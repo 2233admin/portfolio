@@ -1,3 +1,4 @@
+import { CellPainter, type GlyphMode } from "./painter";
 import { bodyHalfWidth, classify, FLAG_BARBEL, FLAG_EYE, FLAG_FIN, type ShapeHit } from "./shape";
 import {
     clamp,
@@ -14,12 +15,16 @@ import {
     type World,
 } from "./world";
 
-type Rgb = [number, number, number];
+export type Rgb = [number, number, number];
 
 // How visible a koi stays while it swims under page content.
 const DIM_UNDER_CONTENT = 0.15;
 
-interface Palette {
+/**
+ * Every colour and strength the pond is drawn with. Pass your own to `KoiRenderer.setPalette` to restyle it.
+ * Keep `white`, `red` and `black` as distinct array objects: the markings are matched to them by identity.
+ */
+export interface Palette {
     /** Page background, which tiles are mixed toward. */
     bg: Rgb;
     white: Rgb;
@@ -42,7 +47,7 @@ interface Palette {
     ink: number;
 }
 
-const DARK: Palette = {
+export const DARK_PALETTE: Palette = {
     bg: [26, 25, 33],
     white: [236, 228, 218],
     red: [232, 96, 56],
@@ -68,7 +73,7 @@ const DARK: Palette = {
 };
 
 // Paper page: tiles are pale washes of the skin colour with dark glyphs etched on top.
-const LIGHT: Palette = {
+export const LIGHT_PALETTE: Palette = {
     bg: [245, 244, 241],
     white: [112, 108, 104],
     red: [204, 62, 28],
@@ -94,6 +99,9 @@ const LIGHT: Palette = {
 };
 
 // Dense glyphs etched into each skin tile, sparse where it catches the light.
+/** Plain `fillText` is as fast as the atlas path or faster in software-rasterised Chromium; the atlas is opt-in via `setGlyphMode`. */
+const DEFAULT_GLYPH_MODE: GlyphMode = "text";
+
 const TILE_GLYPHS = "t%SX8@#";
 const SUBSAMPLES = [0.25, 0.25, 0.75, 0.25, 0.25, 0.75, 0.75, 0.75];
 
@@ -183,8 +191,8 @@ export class KoiRenderer {
     private ch = 12;
     private cols = 0;
     private rows = 0;
-    private palette = DARK;
-    private styles = new Map<number, string>();
+    private palette = DARK_PALETTE;
+    private painter: CellPainter;
     private markingCache = new Map<number, Markings>();
     private fontFamily = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
@@ -213,14 +221,26 @@ export class KoiRenderer {
     private hitTy = 0;
     private hitSeg = 0;
 
-    constructor(canvas: HTMLCanvasElement) {
+    constructor(canvas: HTMLCanvasElement, options: { glyphs?: GlyphMode } = {}) {
         const ctx = canvas.getContext("2d");
         if (!ctx) throw new Error("2D canvas unavailable");
         this.ctx = ctx;
+        this.painter = new CellPainter(options.glyphs ?? DEFAULT_GLYPH_MODE);
+    }
+
+    /** Switch between `fillText` and the glyph atlas; takes effect on the next frame. */
+    setGlyphMode(mode: GlyphMode) {
+        this.painter.mode = mode;
     }
 
     setTheme(isLight: boolean) {
-        this.palette = isLight ? LIGHT : DARK;
+        this.setPalette(isLight ? LIGHT_PALETTE : DARK_PALETTE);
+    }
+
+    /** Swap in a whole palette. The glyph atlas is refilled lazily, so the next frame already uses the new colours. */
+    setPalette(p: Palette) {
+        this.palette = p;
+        this.painter.clearCaches();
     }
 
     resize(width: number, height: number, dpr: number) {
@@ -232,6 +252,14 @@ export class KoiRenderer {
         this.rows = Math.ceil(height / this.ch);
         this.ctx.canvas.width = Math.round(width * dpr);
         this.ctx.canvas.height = Math.round(height * dpr);
+        // Glyph slots depend on the cell size, dpr and font, so a resize starts the painter's caches over.
+        this.painter.configure(
+            this.cw,
+            this.ch,
+            this.cols,
+            dpr,
+            `600 ${Math.round(this.ch * 0.72)}px ${this.fontFamily}`
+        );
 
         const n = this.cols * this.rows;
         this.energy = new Float32Array(n);
@@ -271,8 +299,7 @@ export class KoiRenderer {
     }
 
     render(world: World, dt: number) {
-        const { ctx, dpr, cols } = this;
-        if (cols === 0) return;
+        if (this.cols === 0) return;
 
         this.cellGlyph.fill(0);
         this.cellTileAlpha.fill(0);
@@ -282,36 +309,19 @@ export class KoiRenderer {
         this.depositWake(world);
         this.diffuse(dt);
 
-        ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
-        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-        ctx.font = `600 ${Math.round(this.ch * 0.72)}px ${this.fontFamily}`;
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-
+        const { painter } = this;
+        painter.begin();
         this.drawShadows();
         this.drawWake();
         this.drawRipples(world);
         this.drawPellets(world);
         this.drawCells();
         this.drawBites(world);
-        ctx.globalAlpha = 1;
-    }
-
-    private style(rgb: number) {
-        let s = this.styles.get(rgb);
-        if (!s) {
-            s = `rgb(${rgb >>> 16},${(rgb >>> 8) & 255},${rgb & 255})`;
-            this.styles.set(rgb, s);
-        }
-        return s;
+        painter.flush(this.ctx);
     }
 
     private glyphAt(i: number, glyph: string, rgb: Rgb, alpha: number) {
-        const { ctx, cw, ch, cols } = this;
-        ctx.globalAlpha = alpha;
-        ctx.fillStyle = this.style(packRgb(rgb));
-        ctx.fillText(glyph, (i % cols) * cw + cw / 2, ((i / cols) | 0) * ch + ch / 2);
+        this.painter.glyph(i, glyph.charCodeAt(0), packRgb(rgb), alpha, 0);
     }
 
     private cellIndex(x: number, y: number) {
@@ -588,21 +598,13 @@ export class KoiRenderer {
     }
 
     private drawCells() {
-        const { ctx, cw, ch, cols, cellGlyph, cellColor, cellAlpha, cellTile, cellTileAlpha, cellDim } = this;
+        const { cellGlyph, cellColor, cellAlpha, cellTile, cellTileAlpha, cellDim } = this;
         for (let i = 0; i < cellGlyph.length; i++) {
             const code = cellGlyph[i];
             if (!code) continue;
-            const x = (i % cols) * cw;
-            const y = ((i / cols) | 0) * ch;
-            if (cellTileAlpha[i] > 0) {
-                ctx.globalAlpha = cellTileAlpha[i] * cellDim[i];
-                ctx.fillStyle = this.style(cellTile[i]);
-                ctx.fillRect(x + 1, y + 1, cw - 1, ch - 1);
-            }
+            if (cellTileAlpha[i] > 0) this.painter.tile(i, cellTile[i], cellTileAlpha[i] * cellDim[i]);
             if (code === 32) continue;
-            ctx.globalAlpha = cellAlpha[i] * cellDim[i];
-            ctx.fillStyle = this.style(cellColor[i]);
-            ctx.fillText(String.fromCharCode(code), x + cw / 2, y + ch / 2 + 1);
+            this.painter.glyph(i, code, cellColor[i], cellAlpha[i] * cellDim[i], 1);
         }
     }
 
