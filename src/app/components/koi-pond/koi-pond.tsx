@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import posthog from "posthog-js";
 import { cn } from "../../../lib/utils";
 import { KoiRenderer } from "./renderer";
 import { World, type Box } from "./world";
 
 export type PondStats = { koi: number; pellets: number };
+
+/** Connection state the pond acts out; see `PondEngine.setMood`. */
+export type PondMood = "checking" | "connected" | "disconnected" | "unregistered" | "absent";
 
 const STEP = 1 / 60;
 const MAX_STEPS = 4;
@@ -46,7 +48,9 @@ class PondEngine {
     private reported: PondStats = { koi: -1, pellets: -1 };
     private visible = true;
     private disposed = false;
-    private reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    private moodTimer: ReturnType<typeof setInterval> | null = null;
+    private mood: PondMood | null = null;
+    private anchor: string | undefined;
     private resizeObserver = new ResizeObserver(() => this.resize());
     private intersectionObserver = new IntersectionObserver(([entry]) => {
         this.visible = entry.isIntersecting;
@@ -62,7 +66,6 @@ class PondEngine {
         this.renderer.setTheme(isLight);
         this.resizeObserver.observe(canvas);
         this.intersectionObserver.observe(canvas);
-        this.reducedMotion.addEventListener("change", this.schedule);
         window.addEventListener("pointermove", this.onPointerMove, { passive: true });
         window.addEventListener("click", this.onClick);
         document.documentElement.addEventListener("pointerleave", this.onPointerLeave);
@@ -74,9 +77,9 @@ class PondEngine {
     destroy() {
         this.disposed = true;
         cancelAnimationFrame(this.raf);
+        this.clearMood();
         this.resizeObserver.disconnect();
         this.intersectionObserver.disconnect();
-        this.reducedMotion.removeEventListener("change", this.schedule);
         window.removeEventListener("pointermove", this.onPointerMove);
         window.removeEventListener("click", this.onClick);
         document.documentElement.removeEventListener("pointerleave", this.onPointerLeave);
@@ -85,7 +88,48 @@ class PondEngine {
 
     setTheme(isLight: boolean) {
         this.renderer.setTheme(isLight);
-        if (this.reducedMotion.matches) this.drawStill();
+    }
+
+    /** Where mood events happen, in canvas space: the centre of the anchor element, else the canvas centre. */
+    private anchorPoint() {
+        const origin = this.canvas.getBoundingClientRect();
+        const el = document.querySelector(this.anchor ?? AVOID_TARGETS);
+        if (!el) return { x: origin.width / 2, y: origin.height / 2 };
+        const b = el.getBoundingClientRect();
+        return { x: (b.left + b.right) / 2 - origin.left, y: (b.top + b.bottom) / 2 - origin.top };
+    }
+
+    private clearMood() {
+        if (this.moodTimer !== null) clearInterval(this.moodTimer);
+        this.moodTimer = null;
+        this.world.setUnease(0);
+    }
+
+    /**
+     * Act out a connection state at the anchor. Entering a state fires its one-off event, and the previous state's
+     * lasting effects (the heartbeat timer, unrest) are cleared first. Re-sending the same mood does nothing.
+     */
+    setMood(mood: PondMood, anchor?: string) {
+        if (mood === this.mood && anchor === this.anchor) return;
+        this.mood = mood;
+        this.anchor = anchor;
+        this.clearMood();
+        const world = this.world;
+        const { x, y } = this.anchorPoint();
+        if (mood === "checking") {
+            const beat = () => {
+                const p = this.anchorPoint();
+                world.pulse(p.x, p.y, 0.15);
+            };
+            beat();
+            this.moodTimer = setInterval(beat, 1600);
+        } else if (mood === "connected") {
+            world.pulse(x, y, 0.8);
+            world.gather(x, y, 4);
+        } else if (mood === "disconnected") {
+            world.scatter(x, y);
+            world.setUnease(1);
+        }
     }
 
     private resize() {
@@ -95,7 +139,6 @@ class PondEngine {
         this.world.resize(rect.width, rect.height);
         this.measureContent();
         this.report();
-        if (this.reducedMotion.matches) this.drawStill();
     }
 
     // Only call back when a count changes, so the page doesn't re-render every frame.
@@ -110,10 +153,6 @@ class PondEngine {
     private schedule = () => {
         cancelAnimationFrame(this.raf);
         if (this.disposed || !this.visible) return;
-        if (this.reducedMotion.matches) {
-            this.drawStill();
-            return;
-        }
         this.last = performance.now();
         this.raf = requestAnimationFrame(this.frame);
     };
@@ -151,16 +190,6 @@ class PondEngine {
         this.raf = requestAnimationFrame(this.frame);
     };
 
-    // Reduced motion: let the koi spread out, then hold a single frame.
-    private drawStill() {
-        if (this.world.time < 4) {
-            for (let i = 0; i < 240; i++) this.world.step(STEP);
-        }
-        this.measureContent();
-        this.renderer.render(this.world, STEP);
-        this.report();
-    }
-
     private toLocal(e: MouseEvent) {
         const rect = this.canvas.getBoundingClientRect();
         const x = e.clientX - rect.left;
@@ -182,7 +211,6 @@ class PondEngine {
 
     // Clicks on empty space drop food; links, buttons, and text selection are left alone.
     private onClick = (e: MouseEvent) => {
-        if (this.reducedMotion.matches) return;
         // The path recorded at dispatch, not target.closest(): a control that re-renders as it's clicked (the theme
         // toggle swaps its icon) can leave the target detached, with no ancestors left to find the button through.
         if (e.composedPath().some((n) => n instanceof Element && n.matches(INTERACTIVE))) return;
@@ -190,7 +218,6 @@ class PondEngine {
         const { x, y, inside } = this.toLocal(e);
         if (!inside) return;
         this.world.feed(x, y);
-        posthog.capture("koi_pond_fed", { pellet_count: this.world.pellets.length });
         this.report();
     };
 
@@ -200,9 +227,17 @@ class PondEngine {
     };
 }
 
-type KoiPondProps = { isLight: boolean; className?: string; onStats?: (stats: PondStats) => void };
+type KoiPondProps = {
+    isLight: boolean;
+    className?: string;
+    onStats?: (stats: PondStats) => void;
+    /** Connection state to act out; defaults to plain swimming. */
+    mood?: PondMood;
+    /** CSS selector of the element mood events happen at. Defaults to the first `[data-koi-avoid]` element. */
+    anchor?: string;
+};
 
-export default function KoiPond({ isLight, className, onStats }: KoiPondProps) {
+export default function KoiPond({ isLight, className, onStats, mood = "absent", anchor }: KoiPondProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const engineRef = useRef<PondEngine | null>(null);
     // Read through a ref so a new callback doesn't tear down the engine.
@@ -223,6 +258,10 @@ export default function KoiPond({ isLight, className, onStats }: KoiPondProps) {
     useEffect(() => {
         engineRef.current?.setTheme(isLight);
     }, [isLight]);
+
+    useEffect(() => {
+        engineRef.current?.setMood(mood, anchor);
+    }, [mood, anchor]);
 
     return <canvas ref={canvasRef} aria-hidden="true" className={cn("pointer-events-none", className)} />;
 }

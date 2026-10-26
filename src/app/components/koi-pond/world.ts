@@ -3,6 +3,7 @@ export const KOI_NODES = 20;
 export const RIPPLE_SPEED = 52;
 
 export const clamp = (v: number, lo: number, hi: number) => (v < lo ? lo : v > hi ? hi : v);
+const lerp = (a: number, b: number, t: number) => a + (b - a) * t;
 const rand = (lo: number, hi: number) => lo + Math.random() * (hi - lo);
 
 export function smoothstep(e0: number, e1: number, x: number) {
@@ -160,6 +161,10 @@ export class World {
     pointer = { x: 0, y: 0, speed: 0, active: false };
     /** Page content the koi steer around, in canvas space. */
     avoid: Box[] = [];
+    /** A temporary attraction point set by `gather`: koi near it swim up and circle, like they do around the cursor. */
+    private lure: { x: number; y: number; until: number } | null = null;
+    /** 0..1 persistent unrest set by `setUnease`: koi stay deeper, swim slower and ignore the cursor. */
+    private unease = 0;
 
     resize(width: number, height: number) {
         const first = this.width === 0;
@@ -243,6 +248,35 @@ export class World {
         }
     }
 
+    /** A heartbeat: one ring of the given strength at (x, y). */
+    pulse(x: number, y: number, strength = 0.15) {
+        this.ripples.push({ x, y, born: this.time, strength });
+    }
+
+    /** Draw the koi toward (x, y) for `seconds`: those within range swim up and circle it. Cursor and food outrank it. */
+    gather(x: number, y: number, seconds = 4) {
+        this.lure = { x, y, until: this.time + seconds };
+    }
+
+    /** Spook every koi within range of (x, y): they bolt away and sink into the dark. */
+    scatter(x: number, y: number) {
+        const range = 0.6 * Math.min(this.width, this.height);
+        for (const k of this.koi) {
+            if (Math.hypot(k.nodes[0] - x, k.nodes[1] - y) > range) continue;
+            k.startle = 1;
+            k.fleeX = x;
+            k.fleeY = y;
+            k.depthTarget = 0.5;
+            // Hold the dive for a while before the next random depth is drawn.
+            k.nextDive = Math.max(k.nextDive, this.time + 8);
+        }
+    }
+
+    /** Persistent unrest, 0 (calm) to 1: koi cap their depth near 0.55, slow down by up to 35% and stop following the cursor. */
+    setUnease(level: number) {
+        this.unease = clamp(level, 0, 1);
+    }
+
     step(dt: number) {
         this.time += dt;
         this.pointer.speed *= Math.exp(-dt * 8);
@@ -271,7 +305,7 @@ export class World {
     }
 
     private stepKoi(k: Koi, dt: number) {
-        const { width: W, height: H, pointer, time } = this;
+        const { width: W, height: H, pointer, time, unease } = this;
         const L = k.length;
         const nodes = k.nodes;
         const hx = nodes[0];
@@ -315,13 +349,29 @@ export class World {
             dy += (ty / d) * 3;
             chasing = true;
             closing = clamp(1 - d / (L * 1.2), 0, 1);
-        } else if (pointer.active) {
+        } else if (pointer.active && unease === 0) {
             const tx = pointer.x - hx;
             const ty = pointer.y - hy;
             const d = Math.hypot(tx, ty) || 1;
             const range = 300;
             if (d < range) {
                 // Swim up to the cursor, then circle under it rather than parking.
+                const w = k.curiosity * (1 - d / range) * 2.2;
+                const near = clamp(d / (L * 0.6), 0, 1);
+                dx += ((tx / d) * near - (ty / d) * (1 - near)) * w;
+                dy += ((ty / d) * near + (tx / d) * (1 - near)) * w;
+                curious = true;
+            }
+        }
+
+        const lure = this.lure;
+        if (lure && time >= lure.until) this.lure = null;
+        if (lure && time < lure.until && !fleeing && !food && !curious && unease === 0) {
+            const tx = lure.x - hx;
+            const ty = lure.y - hy;
+            const d = Math.hypot(tx, ty) || 1;
+            const range = 0.45 * Math.min(W, H);
+            if (d < range) {
                 const w = k.curiosity * (1 - d / range) * 2.2;
                 const near = clamp(d / (L * 0.6), 0, 1);
                 dx += ((tx / d) * near - (ty / d) * (1 - near)) * w;
@@ -396,6 +446,8 @@ export class World {
         }
         k.rush = Math.max(0, k.rush - dt * 0.7);
         const cruise = 12 + L * 0.05;
+        // Unrest only slows the unhurried swimming; fleeing and food keep their full speed.
+        const calm = cruise * (1 - 0.35 * unease);
         const target =
             (1 + k.rush * 0.8) *
             (fleeing
@@ -403,8 +455,8 @@ export class World {
                 : chasing
                   ? cruise * (1.9 + closing)
                   : bursting
-                    ? cruise * (curious ? 1.6 : 1.35)
-                    : cruise * 0.45);
+                    ? calm * (curious ? 1.6 : 1.35)
+                    : calm * 0.45);
         k.speed += (target - k.speed) * Math.min(1, dt * (bursting ? 1.6 + k.rush * 3 : 0.35));
         k.phase += dt * (0.6 + k.beat * (2.2 + k.speed / 11));
         k.finPhase += dt * 2.4;
@@ -415,7 +467,8 @@ export class World {
             k.depthTarget = rand(0.5, k.depthMax);
             k.nextDive = time + rand(8, 20);
         }
-        k.depth += ((chasing ? 1 : k.depthTarget) - k.depth) * Math.min(1, dt * (chasing ? 0.8 : 0.15));
+        const depthTarget = unease > 0 ? Math.min(k.depthTarget, lerp(k.depthMax, 0.55, unease)) : k.depthTarget;
+        k.depth += ((chasing ? 1 : depthTarget) - k.depth) * Math.min(1, dt * (chasing ? 0.8 : 0.15));
 
         nodes[0] += Math.cos(k.heading) * k.speed * dt;
         nodes[1] += Math.sin(k.heading) * k.speed * dt;
