@@ -262,6 +262,9 @@ export class KoiRenderer {
     private cellShadow = new Uint8Array(0);
     /** Shadow left on the water by a leaping koi, 0..255: how dark, fading as the koi climbs. */
     private cellShadowLeap = new Uint8Array(0);
+    /** Brightest ripple glyph per cell this frame: its alpha and char code. */
+    private ripA = new Float32Array(0);
+    private ripG = new Uint8Array(0);
 
     private spine = new Float32Array(KOI_NODES * 2);
     private arc = new Float32Array(KOI_NODES);
@@ -349,6 +352,8 @@ export class KoiRenderer {
         this.cellDim = new Float32Array(n).fill(1);
         this.cellShadow = new Uint8Array(n);
         this.cellShadowLeap = new Uint8Array(n);
+        this.ripA = new Float32Array(n);
+        this.ripG = new Uint8Array(n);
     }
 
     /** Fade koi under these canvas-space boxes, easing back in over a few cells around them. */
@@ -969,35 +974,44 @@ export class KoiRenderer {
         }
     }
 
-    /** Expanding rings drawn as ASCII circles: the glyph follows the ring's tangent. */
+    /**
+     * Expanding rings drawn as ASCII circles, one cell wide: every cell the circle passes through gets the line
+     * glyph that follows the circle's tangent there (- / | \\ by octant). Where rings overlap a cell keeps the
+     * brightest one, so crossing rings never cancel into fragments.
+     */
     private drawRipples(world: World) {
-        const { cw, ch, cols, rows, cellGlyph, palette } = this;
+        const { cw, ch, cols, rows, cellGlyph, ripA, ripG, palette } = this;
+        ripA.fill(0);
         for (const rp of world.ripples) {
             const age = world.time - rp.born;
-            const life = rippleLife(rp);
-            const fade = Math.pow(1 - age / life, 1.5) * rp.strength;
+            const fade = Math.pow(1 - age / rippleLife(rp), 1.5) * rp.strength;
             for (let ring = 0; ring < 2; ring++) {
                 const radius = Math.max(0, age - ring * 0.45) * RIPPLE_SPEED * (0.7 + 0.5 * rp.strength);
                 if (radius < 2) continue;
-                const band = cw * 0.6;
                 const c0 = Math.max(0, Math.floor((rp.x - radius - cw) / cw));
                 const c1 = Math.min(cols - 1, Math.floor((rp.x + radius + cw) / cw));
                 const r0 = Math.max(0, Math.floor((rp.y - radius - ch) / ch));
                 const r1 = Math.min(rows - 1, Math.floor((rp.y + radius + ch) / ch));
-                const alpha = Math.min(1, fade * (ring === 0 ? 0.55 : 0.3) * this.art.wake);
+                const alpha = Math.min(1, fade * (ring === 0 ? 0.8 : 0.4) * this.art.wake);
                 for (let r = r0; r <= r1; r++) {
                     for (let c = c0; c <= c1; c++) {
                         const i = r * cols + c;
-                        if (cellGlyph[i]) continue;
+                        if (cellGlyph[i] || alpha <= ripA[i]) continue;
                         const dx = c * cw + cw / 2 - rp.x;
                         const dy = r * ch + ch / 2 - rp.y;
-                        const d = Math.hypot(dx, dy);
-                        if (Math.abs(d - radius) > band) continue;
-                        const glyph = ring === 1 ? "." : lineGlyph(-dy, dx);
-                        this.glyphAt(i, glyph, palette.water, alpha);
+                        const d = Math.hypot(dx, dy) || 1;
+                        // The circle crosses this cell when its distance from the centre is within the cell's
+                        // half-extent along the radial direction.
+                        const half = 0.5 * (Math.abs(dx / d) * cw + Math.abs(dy / d) * ch);
+                        if (Math.abs(d - radius) > half) continue;
+                        ripA[i] = alpha;
+                        ripG[i] = lineGlyph(-dy, dx).charCodeAt(0);
                     }
                 }
             }
+        }
+        for (let i = 0; i < ripA.length; i++) {
+            if (ripA[i] > 0) this.painter.glyph(i, ripG[i], packRgb(palette.water), ripA[i], 0);
         }
     }
 
