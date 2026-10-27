@@ -1053,14 +1053,24 @@ export class KoiRenderer {
                 // Drawn a little above where it will land, closing in as it drops.
                 const i = this.cellIndex(p.x, p.y - (1 - fall) * ch * 1.5);
                 if (i < 0 || cellGlyph[i]) continue;
-                this.glyphAt(i, fall < 0.5 ? "'" : ".", palette.pellet, palette.alpha * (0.5 + 0.4 * fall));
+                // A speck at first, growing to an o as it nears the water.
+                this.glyphAt(
+                    i,
+                    fall < 0.5 ? "\u00b7" : "o",
+                    palette.pellet,
+                    Math.min(1, palette.alpha * (0.7 + 0.5 * fall))
+                );
                 continue;
             }
             const i = this.cellIndex(p.x, p.y);
             if (i < 0 || cellGlyph[i]) continue;
             const sink = smoothstep(PELLET_SINK, PELLET_LIFE, age);
-            const bob = 0.8 + 0.2 * Math.sin(age * 3 + p.x);
-            this.glyphAt(i, sink > 0.55 ? "." : "o", palette.pellet, palette.alpha * bob * (1 - 0.85 * sink));
+            // A solid dot in a brighter shade of the pellet colour that glimmers slowly (0.75 to 1), then sinks away.
+            const lit = palette.bg[0] < 128 ? mix(palette.pellet, [255, 255, 255], 0.3) : shade(palette.pellet, 0.8);
+            const glimmer = 0.875 + 0.125 * Math.sin(age * 2.4 + p.x * 0.7);
+            // A chip of the pellet colour under it, so the dot reads at a glance against the dark water.
+            if (sink <= 0.55) this.painter.tile(i, packRgb(palette.pellet), 0.28 * glimmer * (1 - sink));
+            this.glyphAt(i, sink > 0.55 ? "." : "\u25cf", lit, glimmer * (1 - 0.85 * sink));
         }
     }
 }

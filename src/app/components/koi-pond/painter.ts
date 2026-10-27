@@ -12,7 +12,7 @@ export type GlyphMode = "text" | "atlas";
 
 const KIND_GLYPH = 0;
 const KIND_TILE = 1;
-const CHARS: string[] = Array.from({ length: 128 }, (_, c) => String.fromCharCode(c));
+const CHARS: string[] = Array.from({ length: 256 }, (_, c) => String.fromCharCode(c));
 const rgbCss = (rgb: number) => `rgb(${rgb >>> 16},${(rgb >>> 8) & 255},${rgb & 255})`;
 
 /**
@@ -34,7 +34,7 @@ export class CellPainter {
     private kind = new Uint8Array(0);
     private cell = new Int32Array(0);
     private offset = new Uint8Array(0);
-    private code = new Uint8Array(0);
+    private code = new Uint16Array(0);
     private rgb = new Int32Array(0);
     private alpha = new Float32Array(0);
     private slot = new Int32Array(0);
@@ -69,7 +69,7 @@ export class CellPainter {
         const n = this.count++;
         if (n >= this.alpha.length) {
             const size = Math.max(4096, this.alpha.length * 2);
-            const grow = <T extends Uint8Array | Int32Array | Float32Array>(a: T): T => {
+            const grow = <T extends Uint8Array | Uint16Array | Int32Array | Float32Array>(a: T): T => {
                 const b = new (a.constructor as new (n: number) => T)(size);
                 b.set(a);
                 return b;
@@ -180,7 +180,12 @@ export class CellPainter {
             const i = cell[n];
             const x = (i % cols) * cw;
             const y = ((i / cols) | 0) * ch;
-            if (kind[n] === KIND_GLYPH) ctx.fillText(CHARS[code[n]], x + cw / 2, y + ch / 2 + offset[n]);
+            if (kind[n] === KIND_GLYPH)
+                ctx.fillText(
+                    code[n] < 256 ? CHARS[code[n]] : String.fromCharCode(code[n]),
+                    x + cw / 2,
+                    y + ch / 2 + offset[n]
+                );
             else ctx.fillRect(x + 1, y + 1, cw - 1, ch - 1);
         }
     }

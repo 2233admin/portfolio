@@ -63,10 +63,10 @@ export class GlyphAtlas {
         return this.count;
     }
 
-    /** Slot for a glyph (ASCII char code) in a packed 0xRRGGBB colour, rasterising it on first use. */
+    /** Slot for a glyph (char code, up to 16 bits) in a packed 0xRRGGBB colour, rasterising it on first use. */
     slot(code: number, rgb: number) {
         const q = COLOR_BITS >= 8 ? rgb : (rgb & QMASK) | QMID;
-        const key = (q << 7) | code;
+        const key = q * 65536 + code;
         let id = this.slots.get(key);
         if (id === undefined) {
             id = this.add(code, q);
