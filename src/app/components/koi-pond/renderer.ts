@@ -746,35 +746,26 @@ export class KoiRenderer {
                     glyph = "o";
                     rgb = mix(palette.bg, palette.white, 0.9);
                 } else if (flag === FLAG_FIN) {
-                    // Fins are a pale veil of tiles flecked with dots, so they never compete with the body.
+                    // Fins are a faint wash of tile with rays drawn over it in the pale body colour, so they read
+                    // as translucent membrane next to the body rather than a slab. The tail keeps the V notch of its
+                    // outline because cells outside it are simply not hit.
                     tile = mix(palette.bg, palette.fin, 0.55);
-                    tileAlpha = dim * 0.45 * coverage;
+                    tileAlpha = dim * 0.45 * coverage * 0.25;
                     // Rays run from the root outward: body-space (du along the spine, da away from it) in screen space.
                     const ray = () => lineGlyph(finDu * tx - finDa * side * ty, finDu * ty + finDa * side * tx);
-                    if (h > 0) {
-                        // In the air the tile veil fades out by half height (it would read as a slab at full
-                        // brightness), leaving only the rays, in the pale body colour and not fading with height.
-                        tileAlpha *= 1 - clamp(h / 0.5, 0, 1);
-                        glyph = coverage >= 0.4 ? ray() : ".";
-                        rgb = palette.white;
-                        alpha = dim * (0.6 + 0.4 * coverage);
-                    } else if (ink) {
+                    if (ink && h === 0) {
                         tile = null;
                         tileAlpha = 0;
                         glyph = coverage >= 0.8 && key % 2 === 0 ? ray() : ".";
                         rgb = mix(palette.bg, palette.fin, 0.85);
                         alpha = dim * (0.2 + 0.35 * coverage);
-                    } else if (edge) {
+                    } else {
+                        // In the air the wash fades out by half height and only the rays are left.
+                        tileAlpha *= 1 - clamp(h / 0.5, 0, 1);
                         if (!halo) tileAlpha *= 0.35;
                         glyph = coverage >= 0.4 ? ray() : ".";
-                        rgb = mix(palette.bg, palette.fin, 0.9);
-                        alpha = dim * (0.45 + 0.45 * coverage);
-                    } else {
-                        if (!halo) tileAlpha *= 0.35;
-                        if (key % 2 === 0) {
-                            glyph = ".";
-                            alpha *= 0.6 * coverage;
-                        }
+                        rgb = palette.white;
+                        alpha = dim * (0.5 + 0.4 * coverage);
                     }
                 } else {
                     // Each skin cell is a tile washed in the skin colour, shaded like a rounded back lit from
