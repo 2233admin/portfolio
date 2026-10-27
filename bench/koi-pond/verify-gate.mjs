@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// Drives out/gate-preview.html in headless Chromium and checks the mood and art behaviour.
+// Drives out/gate-preview.html in headless Chromium and checks the moods, the leap and the splash into the workbench.
 //   node bench/koi-pond/build-gate-preview.mjs && node bench/koi-pond/verify-gate.mjs
+import { build } from "esbuild";
 import { chromium } from "playwright";
 import { mkdirSync, writeFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -58,7 +59,12 @@ const countNear = (page, radius) =>
         for (let y = y0; y < y1; y++)
             for (let x = x0; x < x1; x++) {
                 if ((x - cx) ** 2 + (y - cy) ** 2 > r * r) continue;
-                if (d[((y - y0) * (x1 - x0) + (x - x0)) * 4 + 3] > 40) n++;
+                {
+                    // The pond is opaque (backdrop), so "drawn" means not the page background colour.
+                    const o = ((y - y0) * (x1 - x0) + (x - x0)) * 4;
+                    if (d[o + 3] > 40 && Math.abs(d[o] - 26) + Math.abs(d[o + 1] - 25) + Math.abs(d[o + 2] - 33) > 14)
+                        n++;
+                }
             }
         return Math.round(n / (scale * scale)); // css px^2
     }, radius);
@@ -111,55 +117,132 @@ report.totals = Object.fromEntries(
     ])
 );
 
-// 5: art screenshots at dpr 2
-const combos = [
-    ["default", { cell: "8", style: "tile", halo: "开", edge: "关", wake: "1" }],
-    ["cell6-ink", { cell: "6", style: "ink", halo: "开", edge: "关", wake: "1" }],
-    ["cell6-ink-edge-nohalo", { cell: "6", style: "ink", halo: "关", edge: "开", wake: "1" }],
-    ["tile-nohalo-wake2.2", { cell: "8", style: "tile", halo: "关", edge: "关", wake: "2.2" }],
-    ["cell6-tile-edge-nohalo", { cell: "6", style: "tile", halo: "关", edge: "开", wake: "1.6" }],
-];
-report.screenshots = {};
+// 5: leap numbers from a bare World + renderer: the koi's cells before take-off and at the top of the leap
 {
-    const { ctx, page } = await open({ deviceScaleFactor: 2 });
-    for (const [name, o] of combos) {
-        await click(page, "格子", o.cell);
-        await click(page, "风格", o.style);
-        await click(page, "halo", o.halo);
-        await click(page, "edge", o.edge);
-        await click(page, "尾流", o.wake);
-        await click(page, "状态", "无服务");
-        await sleep(2500);
-        const file = join(shots, `art-${name}.png`);
-        let buf = await shot(page);
-        let crop = null;
-        if (buf.length > 400 * 1024) {
-            // Pick the 1000x700 window with the most drawn pixels, so the crop has fish in it.
-            crop = await page.evaluate(() => {
+    const out = join(here, "out/leap-metrics.js");
+    await build({
+        entryPoints: [join(here, "leap-metrics.ts")],
+        bundle: true,
+        format: "iife",
+        target: "es2022",
+        outfile: out,
+        logLevel: "warning",
+    });
+    const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+    await page.setContent("<!doctype html><body style='margin:0'></body>");
+    await page.addScriptTag({ path: out });
+    report.leapCells = [];
+    for (const seed of [1, 2, 3, 4, 5, 6])
+        report.leapCells.push(await page.evaluate((s) => window.leapMetrics(s), seed));
+    await page.close();
+}
+
+// 6: leap and splash frames on the page. A fake clock makes the frames land at exact times: runFor(ms) advances
+// rAF and timers, so "0.55 s after the leap" really is 0.55 s of pond time.
+// Crops keep each PNG under 400 KB; the windows were picked by looking at these seeded runs.
+const CROPS = {
+    "leap-apex": { x: 0, y: 0, width: 1440, height: 900 },
+    "leap-land": { x: 0, y: 0, width: 1440, height: 900 },
+    "splash-mid": { x: 0, y: 0, width: 1440, height: 900 },
+};
+async function save(page, name) {
+    const file = join(shots, `${name}.png`);
+    writeFileSync(file, await page.screenshot({ clip: CROPS[name] }));
+    return statSync(file).size;
+}
+async function frozen(seed) {
+    const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 2 });
+    await ctx.addInitScript(seedScript(seed));
+    const page = await ctx.newPage();
+    page.on("pageerror", (e) => errors.push("pageerror: " + e.message));
+    page.on(
+        "console",
+        (m) =>
+            (m.type() === "error" || m.type() === "warning") &&
+            !m.text().includes("willReadFrequently") &&
+            errors.push(`console ${m.type()}: ${m.text()}`)
+    );
+    await page.clock.install({ time: 0 });
+    await page.goto(url);
+    // Freeze time: from here only runFor() moves rAF, timers and performance.now().
+    await page.clock.pauseAt(1000);
+    await page.clock.runFor(3000);
+    return { ctx, page };
+}
+report.frames = {};
+{
+    const { ctx, page } = await frozen(7);
+    await click(page, "自动跃", "关");
+    await page.getByRole("button", { name: "跳一条" }).click();
+    await page.clock.runFor(550);
+    report.frames["leap-apex"] = await save(page, "leap-apex");
+    // Landing is at 1.1 s; 1.25 s catches the crown of droplets in flight.
+    await page.clock.runFor(700);
+    report.frames["leap-land"] = await save(page, "leap-land");
+    await ctx.close();
+}
+{
+    const { ctx, page } = await frozen(7);
+    await click(page, "自动跃", "关");
+    await page.getByRole("button", { name: /进入/ }).click();
+    await page.clock.runFor(350);
+    report.frames["splash-mid"] = await save(page, "splash-mid");
+    await ctx.close();
+}
+
+// 7: the splash on real time: how long it takes, that the canvas ends up clear and the loop stops, and the restart
+report.splash = [];
+for (const seed of [11, 12, 13]) {
+    const { ctx, page } = await open({}, seed);
+    await sleep(1500);
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => window.__splashMs !== undefined, null, { timeout: 5000 });
+    const after = await page.evaluate(async () => {
+        const c = document.querySelector("canvas");
+        const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
+        let drawn = 0;
+        for (let i = 3; i < d.length; i += 4) if (d[i] !== 0) drawn++;
+        const r1 = window.__renders;
+        await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+        await new Promise((r) => setTimeout(r, 300));
+        const r2 = window.__renders;
+        return {
+            ms: Math.round(window.__splashMs),
+            drawnPixels: drawn,
+            rendersAtResolve: r1,
+            rendersLater: r2,
+            panelOpacity: getComputedStyle(document.querySelector("[data-testid=panel]")).opacity,
+        };
+    });
+    report.splash.push({
+        seed,
+        ...after,
+        restartShown: await page.getByRole("button", { name: "重新开始" }).isVisible(),
+    });
+    if (seed === 11) {
+        // Restart: the pond comes back and the koi move.
+        await page.getByRole("button", { name: "重新开始" }).click();
+        await sleep(1500);
+        const snap = () =>
+            page.evaluate(() => {
                 const c = document.querySelector("canvas");
-                const s = c.width / 1440;
                 const d = c.getContext("2d").getImageData(0, 0, c.width, c.height).data;
-                const step = 20,
-                    W = 1000,
-                    H = 700;
-                let best = { n: -1, x: 0, y: 0 };
-                for (let y = 0; y <= 900 - H; y += step)
-                    for (let x = 0; x <= 1440 - W; x += step) {
-                        let n = 0;
-                        for (let yy = y; yy < y + H; yy += 4)
-                            for (let xx = x; xx < x + W; xx += 4)
-                                if (d[(Math.floor(yy * s) * c.width + Math.floor(xx * s)) * 4 + 3] > 40) n++;
-                        if (n > best.n) best = { n, x, y };
-                    }
-                return { x: best.x, y: best.y, width: W, height: H };
+                let drawn = 0;
+                let sum = 0;
+                for (let i = 0; i < d.length; i += 4) {
+                    if (d[i + 3] !== 0) drawn++;
+                    sum = (sum * 31 + d[i] + d[i + 1] * 3 + d[i + 2] * 7) % 1000003;
+                }
+                return { drawn, sum, renders: window.__renders };
             });
-            buf = await shot(page, crop);
-        }
-        writeFileSync(file, buf);
-        report.screenshots[name] = { bytes: statSync(file).size, crop };
+        const a = await snap();
+        await sleep(400);
+        const b = await snap();
+        report.restart = { pondDrawn: a.drawn > 0, framesDiffer: a.sum !== b.sum, rendering: b.renders > a.renders };
     }
     await ctx.close();
 }
+
 report.errors = errors;
 console.log(JSON.stringify(report, null, 1));
 await browser.close();

@@ -1,7 +1,7 @@
-/* Preview page for the koi pond's connection moods and art options. Built by build-gate-preview.mjs. */
-import { useEffect, useMemo, useRef, useState } from "react";
+/* Preview page for the koi pond's connection moods, leaps and the splash into the workbench. Built by build-gate-preview.mjs. */
+import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import KoiPond, { type PondMood } from "../../src/app/components/koi-pond/koi-pond";
+import KoiPond, { type KoiPondHandle, type PondMood } from "../../src/app/components/koi-pond/koi-pond";
 
 const MOODS: { id: PondMood; label: string; text: string; led: string }[] = [
     { id: "checking", label: "检查中", text: "正在检查连接", led: "#8a8794" },
@@ -10,6 +10,18 @@ const MOODS: { id: PondMood; label: string; text: string; led: string }[] = [
     { id: "unregistered", label: "未登记", text: "未登记", led: "#8a8794" },
     { id: "absent", label: "无服务", text: "未发现本机服务", led: "#8a8794" },
 ];
+
+// Cell size 8 and an opaque pond, so the splash has something to uncover.
+const ART = { cell: 8, backdrop: true };
+
+declare global {
+    interface Window {
+        /** Frames rendered so far, and how long the last splash took (ms), for verify-gate.mjs. */
+        __renders: number;
+        __splashMs: number;
+    }
+}
+window.__renders = 0;
 
 function Segmented<T extends string | number | boolean>(props: {
     label: string;
@@ -37,19 +49,17 @@ function Segmented<T extends string | number | boolean>(props: {
     );
 }
 
-const onOff = [
-    { value: false, label: "关" },
-    { value: true, label: "开" },
-];
+type Phase = "idle" | "splashing" | "done";
 
 function App() {
     const [mood, setMood] = useState<PondMood>("absent");
-    const [cell, setCell] = useState(8);
-    const [style, setStyle] = useState<"tile" | "ink">("tile");
-    const [halo, setHalo] = useState(true);
-    const [edge, setEdge] = useState(false);
-    const [wake, setWake] = useState(1);
-    const art = useMemo(() => ({ cell, style, halo, edge, wake }), [cell, style, halo, edge, wake]);
+    const [leaps, setLeaps] = useState(true);
+    const [phase, setPhase] = useState<Phase>("idle");
+    // A new key mounts a fresh pond, which is how "重新开始" brings it back after a splash has released the old one.
+    const [run, setRun] = useState(0);
+    const pond = useRef<KoiPondHandle>(null);
+    const phaseRef = useRef(phase);
+    phaseRef.current = phase;
 
     const samples = useRef<number[]>([]);
     const [ms, setMs] = useState({ median: 0, p95: 0 });
@@ -61,21 +71,48 @@ function App() {
         return () => clearInterval(id);
     }, []);
 
+    const enter = () => {
+        if (phaseRef.current !== "idle") return;
+        setPhase("splashing");
+        const t0 = performance.now();
+        void pond.current?.splash().then(() => {
+            window.__splashMs = performance.now() - t0;
+            setPhase("done");
+        });
+    };
+    const enterRef = useRef(enter);
+    enterRef.current = enter;
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== "Enter" || (e.target instanceof Element && e.target.closest("button"))) return;
+            enterRef.current();
+        };
+        window.addEventListener("keydown", onKey);
+        return () => window.removeEventListener("keydown", onKey);
+    }, []);
+
     const current = MOODS.find((m) => m.id === mood)!;
     return (
         <>
+            <div className="bench" data-testid="bench">
+                工作台
+            </div>
             <KoiPond
+                key={run}
+                ref={pond}
                 isLight={false}
                 className="pond"
                 mood={mood}
-                art={art}
+                art={ART}
+                leaps={leaps}
                 onRenderMs={(t) => {
+                    window.__renders++;
                     const xs = samples.current;
                     xs.push(t);
                     if (xs.length > 120) xs.shift();
                 }}
             />
-            <div className="panel" data-koi-avoid>
+            <div className={`panel${phase === "idle" ? "" : " gone"}`} data-koi-avoid data-testid="panel">
                 <div className="status">
                     <span className="led" style={{ background: current.led }} data-testid="led" />
                     <span data-testid="status-text">{current.text}</span>
@@ -87,29 +124,35 @@ function App() {
                     options={MOODS.map((m) => ({ value: m.id, label: m.label }))}
                 />
                 <Segmented
-                    label="格子"
-                    value={cell}
-                    onChange={setCell}
-                    options={[8, 7, 6].map((v) => ({ value: v, label: String(v) }))}
-                />
-                <Segmented
-                    label="风格"
-                    value={style}
-                    onChange={setStyle}
+                    label="自动跃"
+                    value={leaps}
+                    onChange={setLeaps}
                     options={[
-                        { value: "tile", label: "tile" },
-                        { value: "ink", label: "ink" },
+                        { value: false, label: "关" },
+                        { value: true, label: "开" },
                     ]}
                 />
-                <Segmented label="halo" value={halo} onChange={setHalo} options={onOff} />
-                <Segmented label="edge" value={edge} onChange={setEdge} options={onOff} />
-                <Segmented
-                    label="尾流"
-                    value={wake}
-                    onChange={setWake}
-                    options={[1, 1.6, 2.2].map((v) => ({ value: v, label: String(v) }))}
-                />
+                <div className="row actions">
+                    <button type="button" className="btn" onClick={() => pond.current?.leap()}>
+                        跳一条
+                    </button>
+                    <button type="button" className="btn primary" onClick={enter}>
+                        进入 ⏎
+                    </button>
+                </div>
             </div>
+            {phase === "done" && (
+                <button
+                    type="button"
+                    className="btn restart"
+                    onClick={() => {
+                        setRun((n) => n + 1);
+                        setPhase("idle");
+                    }}
+                >
+                    重新开始
+                </button>
+            )}
             <div className="perf" data-testid="perf">
                 render 中位 {ms.median.toFixed(2)} ms / p95 {ms.p95.toFixed(2)} ms
             </div>
