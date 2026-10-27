@@ -748,11 +748,17 @@ export class KoiRenderer {
                 } else if (flag === FLAG_FIN) {
                     // Fins are a pale veil of tiles flecked with dots, so they never compete with the body.
                     tile = mix(palette.bg, palette.fin, 0.55);
-                    // Lit to full in the air, a fin veil would turn into a solid slab, so it is thinned as the koi climbs.
-                    tileAlpha = dim * 0.45 * coverage * (1 - 0.6 * h);
+                    tileAlpha = dim * 0.45 * coverage;
                     // Rays run from the root outward: body-space (du along the spine, da away from it) in screen space.
                     const ray = () => lineGlyph(finDu * tx - finDa * side * ty, finDu * ty + finDa * side * tx);
-                    if (ink) {
+                    if (h > 0) {
+                        // In the air the tile veil fades out by half height (it would read as a slab at full
+                        // brightness), leaving only the rays, in the pale body colour and not fading with height.
+                        tileAlpha *= 1 - clamp(h / 0.5, 0, 1);
+                        glyph = coverage >= 0.4 ? ray() : ".";
+                        rgb = palette.white;
+                        alpha = dim * (0.6 + 0.4 * coverage);
+                    } else if (ink) {
                         tile = null;
                         tileAlpha = 0;
                         glyph = coverage >= 0.8 && key % 2 === 0 ? ray() : ".";

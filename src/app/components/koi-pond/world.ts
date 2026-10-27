@@ -333,27 +333,37 @@ export class World {
     /**
      * Throw a koi out of the water for `LEAP_DURATION` seconds: a small ring where it takes off, a big ring and a
      * splash where it lands, and a dive afterwards. With no argument, picks a koi near the surface that isn't busy,
-     * else the one closest to it. Returns the koi, or null if every koi is already in the air.
+     * else the shallowest one. Koi within one body length of page content (`avoid`) are never picked, since the leap
+     * would happen under it. Returns false, doing nothing, if no koi qualifies.
      */
-    leap(k?: Koi): Koi | null {
+    leap(k?: Koi): boolean {
         const fish = k ?? this.pickLeaper(true) ?? this.pickLeaper(false);
-        if (!fish || fish.leap) return null;
+        if (!fish || fish.leap) return false;
         const mid = LEAP_MID;
         this.ripples.push({ x: fish.nodes[mid * 2], y: fish.nodes[mid * 2 + 1], born: this.time, strength: 0.4 });
         fish.leap = { age: 0, side: Math.random() < 0.5 ? -1 : 1 };
         fish.speed = Math.max(fish.speed, (12 + fish.length * 0.05) * 2.2);
-        return fish;
+        return true;
     }
 
     /** A random koi that is near the surface and calm (`idle`), or else simply the shallowest one not in the air. */
     private pickLeaper(idle: boolean) {
-        const free = this.koi.filter((k) => !k.leap);
+        const free = this.koi.filter((k) => !k.leap && !this.nearContent(k));
         const pool = idle
             ? this.unease === 0
                 ? free.filter((k) => k.depth > 0.75 && k.startle === 0 && !k.food && k.rush === 0)
                 : []
             : [free.reduce<Koi | null>((best, k) => (!best || k.depth > best.depth ? k : best), null)];
         return pool.length === 0 ? null : idle ? pool[Math.floor(Math.random() * pool.length)] : pool[0];
+    }
+
+    /** Whether the middle of the koi is within one body length of a content box. */
+    private nearContent(k: Koi) {
+        const x = k.nodes[LEAP_MID * 2];
+        const y = k.nodes[LEAP_MID * 2 + 1];
+        return this.avoid.some(
+            (b) => x > b.left - k.length && x < b.right + k.length && y > b.top - k.length && y < b.bottom + k.length
+        );
     }
 
     private stepLeap(k: Koi, leap: Leap, dt: number) {

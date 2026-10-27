@@ -114,8 +114,8 @@ class PondEngine {
 
     /** Make one koi leap right now: one near the surface if there is one. */
     leap() {
-        if (this.splashing || this.disposed) return;
-        this.world.leap();
+        if (this.splashing || this.disposed) return false;
+        return this.world.leap();
     }
 
     /**
@@ -302,7 +302,7 @@ type KoiPondProps = {
 
 export type KoiPondHandle = {
     /** Make one koi leap right now, e.g. to preview it. */
-    leap(): void;
+    leap(): boolean;
     /** Wash the pond away from the anchor outward; resolves once the canvas is clear and the pond has stopped for good. */
     splash(): Promise<void>;
 };
@@ -328,7 +328,7 @@ const KoiPond = forwardRef<KoiPondHandle, KoiPondProps>(function KoiPond(
     useImperativeHandle(
         ref,
         () => ({
-            leap: () => engineRef.current?.leap(),
+            leap: () => engineRef.current?.leap() ?? false,
             splash: () => engineRef.current?.splash() ?? Promise.resolve(),
         }),
         []

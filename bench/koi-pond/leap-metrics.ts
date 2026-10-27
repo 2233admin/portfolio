@@ -53,7 +53,8 @@ function measure(seed: number) {
     const world = new World();
     world.resize(1440, 900);
     for (let i = 0; i < 600; i++) world.step(STEP);
-    const fish = world.leap() as Koi;
+    world.leap();
+    const fish = world.koi.find((k) => k.leap) as Koi;
     // Only this koi stays, so every cell counted is its own.
     world.koi = [fish];
     const grid = renderer as unknown as Grid;
