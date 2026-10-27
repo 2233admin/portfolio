@@ -107,6 +107,17 @@ class PondEngine {
         this.renderer.setArt(opts);
     }
 
+    /** Let the koi leap now and then on their own (every 25 to 60 seconds). */
+    setLeaps(on: boolean) {
+        this.world.autoLeap = on;
+    }
+
+    /** Make one koi leap right now: one near the surface if there is one. */
+    leap() {
+        if (this.splashing || this.disposed) return;
+        this.world.leap();
+    }
+
     /**
      * A stone dropped at the anchor: a shock front washes the pond away from there outward, so what lies under the
      * canvas is uncovered from the middle. Resolves once the whole canvas is clear, after which the engine has
@@ -283,17 +294,21 @@ type KoiPondProps = {
     art?: ArtOptions;
     /** Called with the time `render()` took, every frame. For benchmarking. */
     onRenderMs?: (ms: number) => void;
+    /** Let koi leap out of the water now and then, every 25 to 60 seconds. Off by default. */
+    leaps?: boolean;
     /** Called every frame of a splash with how far the front has gone, 0 to 1, so the page can fade its content in step. */
     onSplashProgress?: (progress: number) => void;
 };
 
 export type KoiPondHandle = {
+    /** Make one koi leap right now, e.g. to preview it. */
+    leap(): void;
     /** Wash the pond away from the anchor outward; resolves once the canvas is clear and the pond has stopped for good. */
     splash(): Promise<void>;
 };
 
 const KoiPond = forwardRef<KoiPondHandle, KoiPondProps>(function KoiPond(
-    { isLight, className, onStats, mood = "absent", anchor, art, onRenderMs, onSplashProgress },
+    { isLight, className, onStats, mood = "absent", anchor, art, leaps = false, onRenderMs, onSplashProgress },
     ref
 ) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -305,10 +320,19 @@ const KoiPond = forwardRef<KoiPondHandle, KoiPondProps>(function KoiPond(
     onRenderMsRef.current = onRenderMs;
     const onSplashProgressRef = useRef(onSplashProgress);
     onSplashProgressRef.current = onSplashProgress;
+    const leapsRef = useRef(leaps);
+    leapsRef.current = leaps;
     const artRef = useRef(art);
     artRef.current = art;
 
-    useImperativeHandle(ref, () => ({ splash: () => engineRef.current?.splash() ?? Promise.resolve() }), []);
+    useImperativeHandle(
+        ref,
+        () => ({
+            leap: () => engineRef.current?.leap(),
+            splash: () => engineRef.current?.splash() ?? Promise.resolve(),
+        }),
+        []
+    );
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -321,6 +345,7 @@ const KoiPond = forwardRef<KoiPondHandle, KoiPondProps>(function KoiPond(
             (p) => onSplashProgressRef.current?.(p)
         );
         if (artRef.current) engine.setArt(artRef.current);
+        engine.setLeaps(leapsRef.current);
         engineRef.current = engine;
         return () => {
             engine.destroy();
@@ -331,6 +356,10 @@ const KoiPond = forwardRef<KoiPondHandle, KoiPondProps>(function KoiPond(
     useEffect(() => {
         engineRef.current?.setTheme(isLight);
     }, [isLight]);
+
+    useEffect(() => {
+        engineRef.current?.setLeaps(leaps);
+    }, [leaps]);
 
     useEffect(() => {
         if (art) engineRef.current?.setArt(art);

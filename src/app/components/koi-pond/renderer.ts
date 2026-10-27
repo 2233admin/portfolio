@@ -5,6 +5,9 @@ import {
     hash3,
     BITE_LIFE,
     KOI_NODES,
+    LEAP_DURATION,
+    LEAP_MID,
+    leapHeight,
     TAU,
     PELLET_LIFE,
     PELLET_SINK,
@@ -22,6 +25,9 @@ import {
 } from "./world";
 
 export type Rgb = [number, number, number];
+
+/** The widest the fins can be flared by the usual swimming: a full spread, scull and bank together. */
+const MAX_FLARE = 1.5;
 
 // How visible a koi stays while it swims under page content.
 const DIM_UNDER_CONTENT = 0.15;
@@ -248,6 +254,8 @@ export class KoiRenderer {
     private cellDim = new Float32Array(0);
     /** Cells under a koi's shadow on the pond floor. */
     private cellShadow = new Uint8Array(0);
+    /** Shadow left on the water by a leaping koi, 0..255: how dark, fading as the koi climbs. */
+    private cellShadowLeap = new Uint8Array(0);
 
     private spine = new Float32Array(KOI_NODES * 2);
     private arc = new Float32Array(KOI_NODES);
@@ -333,6 +341,7 @@ export class KoiRenderer {
         this.cellTileAlpha = new Float32Array(n);
         this.cellDim = new Float32Array(n).fill(1);
         this.cellShadow = new Uint8Array(n);
+        this.cellShadowLeap = new Uint8Array(n);
     }
 
     /** Fade koi under these canvas-space boxes, easing back in over a few cells around them. */
@@ -367,8 +376,12 @@ export class KoiRenderer {
         this.cellGlyph.fill(0);
         this.cellTileAlpha.fill(0);
         this.cellShadow.fill(0);
-        // Deeper koi first, so the ones near the surface glide over them.
-        for (const k of [...world.koi].sort((a, b) => a.depth - b.depth)) this.rasterizeKoi(k, world.time);
+        this.cellShadowLeap.fill(0);
+        // Deeper koi first, so the ones near the surface glide over them; a koi in the air is above all of them.
+        for (const k of [...world.koi].sort((a, b) => (a.leap ? 1 : 0) - (b.leap ? 1 : 0) || a.depth - b.depth)) {
+            if (k.leap) this.rasterizeKoi(k, world.time, true);
+            this.rasterizeKoi(k, world.time, false);
+        }
         this.depositWake(world);
         this.diffuse(dt);
 
@@ -508,9 +521,9 @@ export class KoiRenderer {
     }
 
     /** Skin colour for a body point, from the koi's own markings pinned to body coordinates. */
-    private skin(k: Koi, s: number, v: number, across: number): Rgb {
+    private skin(k: Koi, s: number, v: number, across: number, length: number): Rgb {
         const p = this.palette;
-        const vn = v / k.length;
+        const vn = v / length;
         // Belly edges and the tail stalk stay white on every variety, which frames the markings.
         if (across > 0.9 || s > 0.74) return p.white;
         // Ragged edges, so patches read as painted markings rather than ellipses.
@@ -530,10 +543,23 @@ export class KoiRenderer {
         return m;
     }
 
-    private rasterizeKoi(k: Koi, t: number) {
+    /**
+     * Rasterise one koi into the cell grid. A koi in mid-leap is sampled the same way from a spine that is bowed,
+     * scaled about the middle of the body and has its fins flared. With `shadowOnly` the leaping koi is instead
+     * sampled as the smaller, fainter shadow it throws on the water, shifted down and right as it climbs, and only
+     * the shadow cells are marked.
+     */
+    private rasterizeKoi(k: Koi, t: number, shadowOnly: boolean) {
         const { spine, arc, cw, ch, cols, rows, cellGlyph, cellColor, cellAlpha, cellTile, cellTileAlpha, palette } =
             this;
-        const L = k.length;
+        const leap = k.leap;
+        const u = leap ? clamp(leap.age / LEAP_DURATION, 0, 1) : 0;
+        const h = leap ? leapHeight(leap.age) : 0;
+        const bend = u < 0.4 ? smoothstep(0, 0.4, u) : 1 - smoothstep(0.4, 1, u);
+        const bow = leap ? leap.side * k.length * 0.1 * bend : 0;
+        const scale = shadowOnly ? 1 - 0.25 * h : 1 + 0.35 * h;
+        const L0 = k.length;
+        const L = L0 * scale;
         const nodes = k.nodes;
         // The body only undulates while the tail is beating; coasting koi hold almost straight.
         const swim = 0.2 + 1.1 * k.beat;
@@ -548,10 +574,28 @@ export class KoiRenderer {
             const tl = Math.hypot(tx, ty) || 1;
             tx /= tl;
             ty /= tl;
-            const amp = L * 0.04 * (0.05 + 0.95 * Math.pow(s, 2.2)) * swim;
-            const off = amp * Math.sin(k.phase - s * 4.6);
+            const amp = L0 * 0.04 * (0.05 + 0.95 * Math.pow(s, 2.2)) * swim;
+            let off = amp * Math.sin(k.phase - s * 4.6);
+            // Bowed like a drawn bow: both ends stay on the line and the middle swings to one side.
+            if (bow !== 0) off += bow * Math.sin(Math.PI * s);
             spine[n * 2] = nodes[n * 2] - ty * off;
             spine[n * 2 + 1] = nodes[n * 2 + 1] + tx * off;
+        }
+        if (scale !== 1) {
+            const mx = (spine[LEAP_MID * 2] + spine[LEAP_MID * 2 + 2]) / 2;
+            const my = (spine[LEAP_MID * 2 + 1] + spine[LEAP_MID * 2 + 3]) / 2;
+            for (let n = 0; n < KOI_NODES; n++) {
+                spine[n * 2] = mx + (spine[n * 2] - mx) * scale;
+                spine[n * 2 + 1] = my + (spine[n * 2 + 1] - my) * scale;
+            }
+        }
+        if (shadowOnly) {
+            // The shadow stays down on the water while the body rises, so it slides away from the body.
+            const away = (0.25 * L0 * h) / Math.SQRT2;
+            for (let n = 0; n < KOI_NODES; n++) {
+                spine[n * 2] += away;
+                spine[n * 2 + 1] += away;
+            }
         }
         arc[0] = 0;
         for (let n = 1; n < KOI_NODES; n++) {
@@ -565,6 +609,12 @@ export class KoiRenderer {
         const bank = clamp(k.turn * 0.6, -0.35, 0.35);
         this.flareLeft = spread + scull - bank;
         this.flareRight = spread - scull + bank;
+        if (leap) {
+            // Fins thrown fully open while the koi is in the air.
+            const open = Math.min(1, h * 1.6);
+            this.flareLeft += (MAX_FLARE - this.flareLeft) * open;
+            this.flareRight += (MAX_FLARE - this.flareRight) * open;
+        }
 
         let minX = Infinity;
         let minY = Infinity;
@@ -587,7 +637,9 @@ export class KoiRenderer {
         // Near the surface a koi is brighter and its shadow falls farther away on the floor.
         const shadowDc = Math.round((L * 0.07 * k.depth) / cw) + 1;
         const shadowDr = Math.round((L * 0.05 * k.depth) / ch) + 1;
-        const dim = palette.alpha * (palette.depthFloor + (1 - palette.depthFloor) * k.depth);
+        let dim = palette.alpha * (palette.depthFloor + (1 - palette.depthFloor) * k.depth);
+        // Out of the water the koi is lit to full.
+        if (h > 0) dim += (1 - dim) * h;
         const [tile0, tile1] = palette.tile;
         const hit = this.hit;
         const { style, edge, halo } = this.art;
@@ -653,6 +705,15 @@ export class KoiRenderer {
                 // Body-anchored key so each glyph rides along with the skin.
                 const key = (hash3(Math.round(s * 90), Math.round(v / (cw * 0.8)), k.id) * 4294967295) >>> 0;
                 const solid = centerHit && coverage >= 0.6;
+                if (shadowOnly) {
+                    const skinCell = flag !== FLAG_BARBEL && flag !== FLAG_FIN && !(flag === FLAG_EYE && solid);
+                    const sc = c + shadowDc;
+                    const sr = r + shadowDr;
+                    if (skinCell && hits === 5 && sc < cols && sr < rows) {
+                        this.cellShadowLeap[sr * cols + sc] = Math.round(255 * (1 - 0.6 * h));
+                    }
+                    continue;
+                }
 
                 let glyph = " ";
                 let rgb: Rgb = palette.fin;
@@ -695,7 +756,7 @@ export class KoiRenderer {
                 } else {
                     // Each skin cell is a tile washed in the skin colour, shaded like a rounded back lit from
                     // the top-left, with a dense glyph etched on top. Edge cells get a paler, empty tile.
-                    const skin = this.skin(k, s, v, across);
+                    const skin = this.skin(k, s, v, across, L);
                     const facing = side * (0.6 * ty - 0.8 * tx) * across;
                     const lum = clamp(0.22 + 0.5 * Math.sqrt(1 - across * across) + 0.18 * facing, 0, 1);
                     if (skin === palette.red) {
@@ -719,7 +780,7 @@ export class KoiRenderer {
                     if (hits === 5) {
                         const sc = c + shadowDc;
                         const sr = r + shadowDr;
-                        if (sc < cols && sr < rows) this.cellShadow[sr * cols + sc] = 1;
+                        if (!leap && sc < cols && sr < rows) this.cellShadow[sr * cols + sc] = 1;
                         tileAlpha = ink ? 0 : dim;
                         if (s < 0.035 && across < 0.6 && k.gulp > 0.5) {
                             glyph = "o";
@@ -819,11 +880,17 @@ export class KoiRenderer {
     }
 
     private drawShadows() {
-        const { cellShadow, cellGlyph, cellDim, palette } = this;
+        const { cellShadow, cellShadowLeap, cellGlyph, cellDim, palette } = this;
         for (let i = 0; i < cellShadow.length; i++) {
             if (!cellShadow[i] || cellGlyph[i]) continue;
             if (this.art.halo) this.glyphAt(i, ":", palette.shadow, palette.shadowAlpha * cellDim[i]);
             else this.glyphAt(i, ".", palette.shadow, palette.shadowAlpha * 0.5 * cellDim[i]);
+        }
+        for (let i = 0; i < cellShadowLeap.length; i++) {
+            if (!cellShadowLeap[i] || cellShadow[i] || cellGlyph[i]) continue;
+            const fade = (cellShadowLeap[i] / 255) * palette.shadowAlpha * cellDim[i];
+            if (this.art.halo) this.glyphAt(i, ":", palette.shadow, fade);
+            else this.glyphAt(i, ".", palette.shadow, fade * 0.5);
         }
     }
 

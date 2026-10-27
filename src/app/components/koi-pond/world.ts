@@ -46,6 +46,14 @@ function pickVariety(): Variety {
     return "kohaku";
 }
 
+/** A koi in mid-leap; see `World.leap`. */
+export interface Leap {
+    /** Seconds since take-off. */
+    age: number;
+    /** Which way the body bows, +1 or -1. */
+    side: 1 | -1;
+}
+
 export interface Koi {
     id: number;
     variety: Variety;
@@ -84,6 +92,8 @@ export interface Koi {
     fleeY: number;
     /** How far the mouth is open, as the koi closes in on food. */
     gulp: number;
+    /** Set while the koi is out of the water. */
+    leap: Leap | null;
 }
 
 export interface Pellet {
@@ -158,6 +168,12 @@ export const BITE_LIFE = 0.45;
 export const SPLASH_LIFE = 0.8;
 /** Seconds the splash front takes to cross the pond. */
 export const WAVE_DURATION = 0.8;
+/** Seconds a leap lasts, from take-off to landing. */
+export const LEAP_DURATION = 1.1;
+/** The spine node a leap is centred on: the middle of the body. */
+export const LEAP_MID = (KOI_NODES - 1) >> 1;
+/** Seconds between automatic leaps are drawn from this range. */
+const AUTO_LEAP_EVERY: [number, number] = [25, 60];
 const RUSH_RANGE = 650;
 const FEED_CALM = 2;
 /** Uneaten pellets start to sink this many seconds in, fading out by PELLET_LIFE. */
@@ -175,6 +191,9 @@ export class World {
     bites: Bite[] = [];
     /** The splash front crossing the pond, if `splash` has been called. It stays once finished. */
     wave: Wave | null = null;
+    /** When true, a koi near the surface leaps every 25 to 60 seconds. Off by default. */
+    autoLeap = false;
+    private nextLeap = -1;
     /** Moving the mouse to throw food isn't a threat, so swipes don't startle koi for a moment after a throw. */
     private lastFeed = -Infinity;
     ripples: Ripple[] = [];
@@ -242,6 +261,7 @@ export class World {
                 fleeX: 0,
                 fleeY: 0,
                 gulp: 0,
+                leap: null,
             });
         }
     }
@@ -310,6 +330,59 @@ export class World {
         this.bites.push({ x, y, born: this.time, size: 3 });
     }
 
+    /**
+     * Throw a koi out of the water for `LEAP_DURATION` seconds: a small ring where it takes off, a big ring and a
+     * splash where it lands, and a dive afterwards. With no argument, picks a koi near the surface that isn't busy,
+     * else the one closest to it. Returns the koi, or null if every koi is already in the air.
+     */
+    leap(k?: Koi): Koi | null {
+        const fish = k ?? this.pickLeaper(true) ?? this.pickLeaper(false);
+        if (!fish || fish.leap) return null;
+        const mid = LEAP_MID;
+        this.ripples.push({ x: fish.nodes[mid * 2], y: fish.nodes[mid * 2 + 1], born: this.time, strength: 0.4 });
+        fish.leap = { age: 0, side: Math.random() < 0.5 ? -1 : 1 };
+        fish.speed = Math.max(fish.speed, (12 + fish.length * 0.05) * 2.2);
+        return fish;
+    }
+
+    /** A random koi that is near the surface and calm (`idle`), or else simply the shallowest one not in the air. */
+    private pickLeaper(idle: boolean) {
+        const free = this.koi.filter((k) => !k.leap);
+        const pool = idle
+            ? this.unease === 0
+                ? free.filter((k) => k.depth > 0.75 && k.startle === 0 && !k.food && k.rush === 0)
+                : []
+            : [free.reduce<Koi | null>((best, k) => (!best || k.depth > best.depth ? k : best), null)];
+        return pool.length === 0 ? null : idle ? pool[Math.floor(Math.random() * pool.length)] : pool[0];
+    }
+
+    private stepLeap(k: Koi, leap: Leap, dt: number) {
+        leap.age += dt;
+        // Out of the water the koi is as near the surface as it gets.
+        k.depth += (1 - k.depth) * Math.min(1, dt * 6);
+        if (leap.age < LEAP_DURATION) return;
+        k.leap = null;
+        const mid = LEAP_MID;
+        const x = k.nodes[mid * 2];
+        const y = k.nodes[mid * 2 + 1];
+        this.ripples.push({ x, y, born: this.time, strength: 0.9 });
+        this.bites.push({ x, y, born: this.time, size: 2 });
+        // Back under and down for a few seconds.
+        k.depthTarget = 0.5;
+        k.nextDive = Math.max(k.nextDive, this.time + rand(4, 7));
+    }
+
+    private stepAutoLeap() {
+        if (this.nextLeap < 0) {
+            this.nextLeap = this.time + rand(...AUTO_LEAP_EVERY);
+        } else if (this.time >= this.nextLeap) {
+            const k = this.pickLeaper(true);
+            if (k) this.leap(k);
+            // Nobody suitable right now: look again shortly rather than waiting out another full interval.
+            this.nextLeap = this.time + (k ? rand(...AUTO_LEAP_EVERY) : 3);
+        }
+    }
+
     /** Persistent unrest, 0 (calm) to 1: koi cap their depth near 0.55, slow down by up to 35% and stop following the cursor. */
     setUnease(level: number) {
         this.unease = clamp(level, 0, 1);
@@ -319,6 +392,9 @@ export class World {
         this.time += dt;
         this.pointer.speed *= Math.exp(-dt * 8);
         for (const k of this.koi) this.stepKoi(k, dt);
+        for (const k of this.koi) if (k.leap) this.stepLeap(k, k.leap, dt);
+        if (this.autoLeap) this.stepAutoLeap();
+        else this.nextLeap = -1;
         if (this.wave) this.stepWave(this.wave);
         const t = this.time;
         this.pellets = this.pellets.filter((p) => t - p.born < PELLET_LIFE);
@@ -501,7 +577,7 @@ export class World {
             k.burstUntil = time + rand(0.7, 1.6);
             k.nextBurst = k.burstUntil + rand(1.2, 4);
         }
-        const bursting = fleeing || chasing || lured || time < k.burstUntil;
+        const bursting = fleeing || chasing || lured || time < k.burstUntil || k.leap !== null;
         k.beat += ((bursting ? 1 : 0) - k.beat) * Math.min(1, dt * 3);
         // Tail beats near the surface push small rings out behind the koi; gliding or deep koi leave none.
         if (k.beat > 0.6 && k.depth > 0.65 && time > k.nextWake) {
@@ -601,6 +677,11 @@ export function waveProgress(w: Wave, time: number) {
 export function waveRadius(w: Wave, time: number) {
     const p = waveProgress(w, time);
     return w.maxR * (1 - (1 - p) ** 3);
+}
+
+/** How high above the water a leaping koi is, 0 to 1 and back, for `age` seconds into the leap. */
+export function leapHeight(age: number) {
+    return Math.sin(Math.PI * clamp(age / LEAP_DURATION, 0, 1));
 }
 
 export function rippleLife(r: Ripple) {
