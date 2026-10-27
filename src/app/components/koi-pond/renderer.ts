@@ -652,6 +652,10 @@ export class KoiRenderer {
         const r1 = Math.min(rows - 1, Math.floor((maxY + reach) / ch));
         if (c0 > c1 || r0 > r1) return;
 
+        // Each side gets a single eye: the eye-hit cell closest to where the eye ideally sits. The rest of the
+        // eye band is painted as plain skin, so a big koi doesn't grow a row of "o o o o".
+        const eyeCell = this.pickEyeCells(L);
+
         const diag = Math.hypot(cw, ch);
         // Near the surface a koi is brighter and its shadow falls farther away on the floor.
         const shadowDc = Math.round((L * 0.07 * k.depth) / cw) + 1;
@@ -740,7 +744,7 @@ export class KoiRenderer {
                     // Drawn along the whisker: forward from the mouth and angled out to its side.
                     glyph = lineGlyph(-tx - side * ty * 0.7, -ty + side * tx * 0.7);
                     rgb = shade(mix(palette.bg, palette.fin, 0.9), palette.ink + 0.3);
-                } else if (flag === FLAG_EYE && solid) {
+                } else if (flag === FLAG_EYE && solid && i === eyeCell[v >= 0 ? 0 : 1]) {
                     tile = mix(palette.bg, palette.eye, 0.85);
                     tileAlpha = dim;
                     glyph = "o";
@@ -846,6 +850,47 @@ export class KoiRenderer {
                 cellAlpha[i] = alpha;
             }
         }
+    }
+
+    /**
+     * The cell for each eye of the koi in `spine` (index 0 for the side where v >= 0, 1 for the other), or -1:
+     * among cells near the ideal eye spot whose centre hits the eye, the closest one; else the cell holding the spot.
+     */
+    private pickEyeCells(L: number): [number, number] {
+        const { spine, arc, cw, ch, cols, rows } = this;
+        const sEye = 0.0775;
+        const target = sEye * this.arcTotal;
+        let n = 0;
+        while (n < KOI_NODES - 2 && arc[n + 1] < target) n++;
+        const sx = spine[(n + 1) * 2] - spine[n * 2];
+        const sy = spine[(n + 1) * 2 + 1] - spine[n * 2 + 1];
+        const len = Math.hypot(sx, sy) || 1;
+        const u = clamp((target - arc[n]) / len, 0, 1);
+        const bx = spine[n * 2] + sx * u;
+        const by = spine[n * 2 + 1] + sy * u;
+        const out: [number, number] = [-1, -1];
+        for (let k = 0; k < 2; k++) {
+            const sign = k === 0 ? 1 : -1;
+            const off = 0.675 * bodyHalfWidth(sEye) * L * sign;
+            const ex = bx + (-sy / len) * off;
+            const ey = by + (sx / len) * off;
+            const c0 = Math.floor(ex / cw);
+            const r0 = Math.floor(ey / ch);
+            let best = Infinity;
+            for (let r = r0 - 2; r <= r0 + 2; r++) {
+                for (let c = c0 - 2; c <= c0 + 2; c++) {
+                    if (c < 0 || r < 0 || c >= cols || r >= rows) continue;
+                    if (!this.sample(c * cw + cw / 2, r * ch + ch / 2, L) || this.hit.flag !== FLAG_EYE) continue;
+                    const d = (c * cw + cw / 2 - ex) ** 2 + (r * ch + ch / 2 - ey) ** 2;
+                    if (d < best) {
+                        best = d;
+                        out[k] = r * cols + c;
+                    }
+                }
+            }
+            if (out[k] < 0 && c0 >= 0 && r0 >= 0 && c0 < cols && r0 < rows) out[k] = r0 * cols + c0;
+        }
+        return out;
     }
 
     private drawCells() {
