@@ -4,7 +4,7 @@ import { KoiRenderer as BaselineRenderer } from "./baseline/renderer.baseline";
 import { World, type Box } from "../../src/app/components/koi-pond/world";
 
 type AnyRenderer = KoiRenderer | BaselineRenderer;
-export type Variant = "baseline" | "text" | "atlas";
+export type Variant = "baseline" | "text" | "atlas" | "explicit";
 export type Config = { width: number; height: number; dpr: number; frames: number; warmup: number; light?: boolean };
 
 const STEP = 1 / 60;
@@ -22,7 +22,14 @@ function mulberry32(seed: number) {
 }
 
 function makeRenderer(variant: Variant, canvas: HTMLCanvasElement, light: boolean): AnyRenderer {
-    const r = variant === "baseline" ? new BaselineRenderer(canvas) : new KoiRenderer(canvas, { glyphs: variant });
+    // "explicit" is the text renderer with every art option spelled out at its default value.
+    const r =
+        variant === "baseline"
+            ? new BaselineRenderer(canvas)
+            : new KoiRenderer(canvas, { glyphs: variant === "explicit" ? "text" : variant });
+    if (variant === "explicit" && r instanceof KoiRenderer) {
+        r.setArt({ style: "tile", halo: true, edge: false, wake: 1 });
+    }
     r.setTheme(light);
     return r;
 }

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { cn } from "../../../lib/utils";
-import { KoiRenderer } from "./renderer";
+import { KoiRenderer, type ArtOptions } from "./renderer";
 import { World, type Box } from "./world";
 
 export type PondStats = { koi: number; pellets: number };
@@ -60,7 +60,8 @@ class PondEngine {
     constructor(
         private canvas: HTMLCanvasElement,
         isLight: boolean,
-        private onStats: (stats: PondStats) => void
+        private onStats: (stats: PondStats) => void,
+        private onRenderMs?: (ms: number) => void
     ) {
         this.renderer = new KoiRenderer(canvas);
         this.renderer.setTheme(isLight);
@@ -97,6 +98,10 @@ class PondEngine {
         if (!el) return { x: origin.width / 2, y: origin.height / 2 };
         const b = el.getBoundingClientRect();
         return { x: (b.left + b.right) / 2 - origin.left, y: (b.top + b.bottom) / 2 - origin.top };
+    }
+
+    setArt(opts: ArtOptions) {
+        this.renderer.setArt(opts);
     }
 
     private clearMood() {
@@ -185,7 +190,9 @@ class PondEngine {
         }
         if (steps === MAX_STEPS) this.acc = 0;
         if (++this.frames % MEASURE_EVERY_FRAMES === 0) this.measureContent();
+        const t0 = this.onRenderMs ? performance.now() : 0;
         this.renderer.render(this.world, dt);
+        this.onRenderMs?.(performance.now() - t0);
         this.report();
         this.raf = requestAnimationFrame(this.frame);
     };
@@ -235,19 +242,41 @@ type KoiPondProps = {
     mood?: PondMood;
     /** CSS selector of the element mood events happen at. Defaults to the first `[data-koi-avoid]` element. */
     anchor?: string;
+    /** Renderer art options; omit for the original look. */
+    art?: ArtOptions;
+    /** Called with the time `render()` took, every frame. For benchmarking. */
+    onRenderMs?: (ms: number) => void;
 };
 
-export default function KoiPond({ isLight, className, onStats, mood = "absent", anchor }: KoiPondProps) {
+export default function KoiPond({
+    isLight,
+    className,
+    onStats,
+    mood = "absent",
+    anchor,
+    art,
+    onRenderMs,
+}: KoiPondProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const engineRef = useRef<PondEngine | null>(null);
     // Read through a ref so a new callback doesn't tear down the engine.
     const onStatsRef = useRef(onStats);
     onStatsRef.current = onStats;
+    const onRenderMsRef = useRef(onRenderMs);
+    onRenderMsRef.current = onRenderMs;
+    const artRef = useRef(art);
+    artRef.current = art;
 
     useEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
-        const engine = new PondEngine(canvas, isLight, (stats) => onStatsRef.current?.(stats));
+        const engine = new PondEngine(
+            canvas,
+            isLight,
+            (stats) => onStatsRef.current?.(stats),
+            (ms) => onRenderMsRef.current?.(ms)
+        );
+        if (artRef.current) engine.setArt(artRef.current);
         engineRef.current = engine;
         return () => {
             engine.destroy();
@@ -258,6 +287,10 @@ export default function KoiPond({ isLight, className, onStats, mood = "absent", 
     useEffect(() => {
         engineRef.current?.setTheme(isLight);
     }, [isLight]);
+
+    useEffect(() => {
+        if (art) engineRef.current?.setArt(art);
+    }, [art]);
 
     useEffect(() => {
         engineRef.current?.setMood(mood, anchor);

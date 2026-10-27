@@ -98,6 +98,29 @@ export const LIGHT_PALETTE: Palette = {
     ink: 0.45,
 };
 
+/**
+ * Optional art tweaks; the defaults reproduce the original look pixel for pixel.
+ * - `cell`: target cell width in px (default: width / 125, clamped to 8..12). Smaller gives finer outlines.
+ * - `style`: `tile` washes each cell in skin colour with a glyph etched on it; `ink` draws glyphs only, picked from a
+ *   brightness ramp and coloured like the skin, on the bare background.
+ * - `halo`: false stops the pale tiles and dark shadow marks that ring the koi from reading as grey blocks.
+ * - `edge`: true gives outline cells a glyph that follows the outline (`/ \ ( ) _ -`) and fin cells a line along
+ *   their rays, so contours and fins read as shapes rather than steps.
+ * - `wake`: brightness multiplier for the tail wake and ripple glyphs.
+ */
+export interface ArtOptions {
+    cell?: number;
+    style?: "tile" | "ink";
+    halo?: boolean;
+    edge?: boolean;
+    wake?: number;
+}
+type Art = Required<Omit<ArtOptions, "cell">> & { cell: number | null };
+const DEFAULT_ART: Art = { cell: null, style: "tile", halo: true, edge: false, wake: 1 };
+
+/** Light to dense, for the ink style. */
+const INK_RAMP = " .:-=+*#%@";
+
 // Dense glyphs etched into each skin tile, sparse where it catches the light.
 /** Plain `fillText` is as fast as the atlas path or faster in software-rasterised Chromium; the atlas is opt-in via `setGlyphMode`. */
 const DEFAULT_GLYPH_MODE: GlyphMode = "text";
@@ -111,6 +134,15 @@ function lineGlyph(dx: number, dy: number) {
     if (Math.abs(dy) < 0.38 * d) return "-";
     if (Math.abs(dx) < 0.38 * d) return "|";
     return dx * dy > 0 ? "\\" : "/";
+}
+
+/** A glyph that follows the outline, given the direction (in px) from a cell's centre into the body. */
+function outlineGlyph(gx: number, gy: number) {
+    const d = Math.hypot(gx, gy) || 1;
+    if (Math.abs(gy) < 0.38 * d) return gx > 0 ? "(" : ")";
+    if (Math.abs(gx) < 0.38 * d) return gy > 0 ? "-" : "_";
+    // The outline runs perpendicular to that direction.
+    return -gy * gx > 0 ? "\\" : "/";
 }
 
 function valueNoise(x: number, y: number, seed: number) {
@@ -194,6 +226,10 @@ export class KoiRenderer {
     private palette = DARK_PALETTE;
     private painter: CellPainter;
     private markingCache = new Map<number, Markings>();
+    private art: Art = DEFAULT_ART;
+    private width = 0;
+    private height = 0;
+    private dimBoxes: Box[] = [];
     private fontFamily = "ui-monospace, SFMono-Regular, Menlo, monospace";
 
     private energy = new Float32Array(0);
@@ -233,6 +269,23 @@ export class KoiRenderer {
         this.painter.mode = mode;
     }
 
+    /** Change the art options (merged into the current ones); a new cell size re-lays-out the grid. */
+    setArt(opts: ArtOptions) {
+        const next: Art = {
+            cell: opts.cell === undefined ? this.art.cell : opts.cell,
+            style: opts.style ?? this.art.style,
+            halo: opts.halo ?? this.art.halo,
+            edge: opts.edge ?? this.art.edge,
+            wake: opts.wake ?? this.art.wake,
+        };
+        const relayout = next.cell !== this.art.cell;
+        this.art = next;
+        if (relayout && this.width > 0) {
+            this.resize(this.width, this.height, this.dpr);
+            this.setDimBoxes(this.dimBoxes);
+        }
+    }
+
     setTheme(isLight: boolean) {
         this.setPalette(isLight ? LIGHT_PALETTE : DARK_PALETTE);
     }
@@ -245,8 +298,11 @@ export class KoiRenderer {
 
     resize(width: number, height: number, dpr: number) {
         this.dpr = dpr;
+        this.width = width;
+        this.height = height;
         // Near-square tiles, large enough to read each etched glyph.
-        this.cw = clamp(Math.round(width / 125), 8, 12);
+        this.cw =
+            this.art.cell === null ? clamp(Math.round(width / 125), 8, 12) : Math.max(3, Math.round(this.art.cell));
         this.ch = this.cw + 2;
         this.cols = Math.ceil(width / this.cw);
         this.rows = Math.ceil(height / this.ch);
@@ -275,6 +331,7 @@ export class KoiRenderer {
 
     /** Fade koi under these canvas-space boxes, easing back in over a few cells around them. */
     setDimBoxes(boxes: Box[]) {
+        this.dimBoxes = boxes;
         const { cols, rows, cw, ch, cellDim } = this;
         cellDim.fill(1);
         const pad = cw * 4;
@@ -463,6 +520,8 @@ export class KoiRenderer {
         const dim = palette.alpha * (palette.depthFloor + (1 - palette.depthFloor) * k.depth);
         const [tile0, tile1] = palette.tile;
         const hit = this.hit;
+        const { style, edge, halo } = this.art;
+        const ink = style === "ink";
 
         for (let r = r0; r <= r1; r++) {
             for (let c = c0; c <= c1; c++) {
@@ -479,6 +538,8 @@ export class KoiRenderer {
                 const from = Math.max(0, this.hitSeg - 2);
                 const to = Math.min(KOI_NODES - 2, this.hitSeg + 2);
                 let { flag, across } = hit;
+                let finDu = hit.du;
+                let finDa = hit.da;
                 let s = this.hitS;
                 let v = this.hitV;
                 let tx = this.hitTx;
@@ -503,6 +564,8 @@ export class KoiRenderer {
                     gy += (SUBSAMPLES[q + 1] - 0.5) * ch;
                     if (hits === 0) {
                         ({ flag, across } = hit);
+                        finDu = hit.du;
+                        finDa = hit.da;
                         s = this.hitS;
                         v = this.hitV;
                         tx = this.hitTx;
@@ -539,9 +602,25 @@ export class KoiRenderer {
                     // Fins are a pale veil of tiles flecked with dots, so they never compete with the body.
                     tile = mix(palette.bg, palette.fin, 0.55);
                     tileAlpha = dim * 0.45 * coverage;
-                    if (key % 2 === 0) {
-                        glyph = ".";
-                        alpha *= 0.6 * coverage;
+                    // Rays run from the root outward: body-space (du along the spine, da away from it) in screen space.
+                    const ray = () => lineGlyph(finDu * tx - finDa * side * ty, finDu * ty + finDa * side * tx);
+                    if (ink) {
+                        tile = null;
+                        tileAlpha = 0;
+                        glyph = coverage >= 0.8 && key % 2 === 0 ? ray() : ".";
+                        rgb = mix(palette.bg, palette.fin, 0.85);
+                        alpha = dim * (0.2 + 0.35 * coverage);
+                    } else if (edge) {
+                        if (!halo) tileAlpha *= 0.35;
+                        glyph = coverage >= 0.4 ? ray() : ".";
+                        rgb = mix(palette.bg, palette.fin, 0.9);
+                        alpha = dim * (0.45 + 0.45 * coverage);
+                    } else {
+                        if (!halo) tileAlpha *= 0.35;
+                        if (key % 2 === 0) {
+                            glyph = ".";
+                            alpha *= 0.6 * coverage;
+                        }
                     }
                 } else {
                     // Each skin cell is a tile washed in the skin colour, shaded like a rounded back lit from
@@ -561,14 +640,28 @@ export class KoiRenderer {
                     } else {
                         tile = mix(palette.bg, skin, tile0 + (tile1 - tile0) * lum);
                     }
+                    // Ink style paints with the skin colour itself, lit by the same shading.
+                    const skinInk: Rgb = ink
+                        ? skin === palette.red
+                            ? tile
+                            : mix(palette.bg, skin, 0.62 + 0.38 * lum)
+                        : tile;
                     if (hits === 5) {
                         const sc = c + shadowDc;
                         const sr = r + shadowDr;
                         if (sc < cols && sr < rows) this.cellShadow[sr * cols + sc] = 1;
-                        tileAlpha = dim;
+                        tileAlpha = ink ? 0 : dim;
                         if (s < 0.035 && across < 0.6 && k.gulp > 0.5) {
                             glyph = "o";
-                            rgb = palette.eye;
+                            rgb = ink ? mix(palette.bg, skin, 0.35) : palette.eye;
+                        } else if (ink) {
+                            const jitter = ((key >>> 4) % 3) - 1;
+                            const weight = skin === palette.black ? 0.75 : 1;
+                            const d = clamp((lum * 1.15 - 0.05 + jitter * 0.04) * weight, 0, 1);
+                            glyph = INK_RAMP[1 + Math.round(d * (INK_RAMP.length - 2))];
+                            rgb = skinInk;
+                            const tick = Math.floor(t * 1.4 + (key % 997) / 97);
+                            if (hash3(key, tick, 7) < 0.03) rgb = mix(rgb, palette.bg, 0.45);
                         } else {
                             const jitter = (key >>> 4) % 3;
                             glyph = TILE_GLYPHS[clamp(Math.round((1 - lum) * 4) + jitter, 0, TILE_GLYPHS.length - 1)];
@@ -580,8 +673,21 @@ export class KoiRenderer {
                             if (hash3(key, tick, 7) < 0.03) tile = mix(tile, palette.bg, 0.45);
                         }
                     } else {
-                        tileAlpha = dim * coverage * 0.55;
-                        if (Math.hypot(gx, gy) > cw * 0.2 && key % 3 === 0) {
+                        tileAlpha = ink ? 0 : dim * coverage * 0.55;
+                        // Without the halo, only cells mostly inside the body keep a (fainter) tile.
+                        if (!halo && !ink) tileAlpha = coverage >= 0.6 ? tileAlpha * 0.5 : 0;
+                        const g = Math.hypot(gx, gy);
+                        if (edge && g > cw * 0.1) {
+                            glyph = outlineGlyph(gx, gy);
+                            rgb = mix(palette.bg, skin === palette.red ? skinInk : skin, 0.85);
+                            alpha = dim * (0.55 + 0.4 * coverage);
+                        } else if (ink) {
+                            if (g > cw * 0.2) {
+                                glyph = coverage >= 0.6 ? ":" : ".";
+                                rgb = skinInk;
+                                alpha = dim * 0.8;
+                            }
+                        } else if (g > cw * 0.2 && key % 3 === 0) {
                             glyph = ".";
                             rgb = shade(tile, palette.ink);
                         }
@@ -646,7 +752,8 @@ export class KoiRenderer {
         const { cellShadow, cellGlyph, cellDim, palette } = this;
         for (let i = 0; i < cellShadow.length; i++) {
             if (!cellShadow[i] || cellGlyph[i]) continue;
-            this.glyphAt(i, ":", palette.shadow, palette.shadowAlpha * cellDim[i]);
+            if (this.art.halo) this.glyphAt(i, ":", palette.shadow, palette.shadowAlpha * cellDim[i]);
+            else this.glyphAt(i, ".", palette.shadow, palette.shadowAlpha * 0.5 * cellDim[i]);
         }
     }
 
@@ -655,7 +762,12 @@ export class KoiRenderer {
         for (let i = 0; i < energy.length; i++) {
             const e = energy[i];
             if (e < 0.22 || cellGlyph[i] || cellShadow[i]) continue;
-            this.glyphAt(i, e > 0.5 ? "-" : ".", palette.water, Math.min(1, (e - 0.22) * 1.4) * 0.35);
+            this.glyphAt(
+                i,
+                e > 0.5 ? "-" : ".",
+                palette.water,
+                Math.min(1, Math.min(1, (e - 0.22) * 1.4) * 0.35 * this.art.wake)
+            );
         }
     }
 
@@ -674,7 +786,7 @@ export class KoiRenderer {
                 const c1 = Math.min(cols - 1, Math.floor((rp.x + radius + cw) / cw));
                 const r0 = Math.max(0, Math.floor((rp.y - radius - ch) / ch));
                 const r1 = Math.min(rows - 1, Math.floor((rp.y + radius + ch) / ch));
-                const alpha = fade * (ring === 0 ? 0.55 : 0.3);
+                const alpha = Math.min(1, fade * (ring === 0 ? 0.55 : 0.3) * this.art.wake);
                 for (let r = r0; r <= r1; r++) {
                     for (let c = c0; c <= c1; c++) {
                         const i = r * cols + c;
