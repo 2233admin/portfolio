@@ -327,7 +327,7 @@ export class World {
             pushed: new Set(),
         };
         this.ripples.push({ x, y, born: this.time, strength: 1 });
-        this.bites.push({ x, y, born: this.time, size: 3 });
+        this.bites.push({ x, y, born: this.time, size: 4 });
     }
 
     /**
@@ -366,7 +366,7 @@ export class World {
         const x = k.nodes[mid * 2];
         const y = k.nodes[mid * 2 + 1];
         this.ripples.push({ x, y, born: this.time, strength: 0.9 });
-        this.bites.push({ x, y, born: this.time, size: 2 });
+        this.bites.push({ x, y, born: this.time, size: 3 });
         // Back under and down for a few seconds.
         k.depthTarget = 0.5;
         k.nextDive = Math.max(k.nextDive, this.time + rand(4, 7));
@@ -673,10 +673,10 @@ export function waveProgress(w: Wave, time: number) {
     return clamp((time - w.born) / w.duration, 0, 1);
 }
 
-/** Radius of the splash front: fast at first, easing out (cubic) to `maxR`. */
+/** Radius of the splash front: fast at first, easing out (power 1.7) to `maxR`. */
 export function waveRadius(w: Wave, time: number) {
     const p = waveProgress(w, time);
-    return w.maxR * (1 - (1 - p) ** 3);
+    return w.maxR * (1 - (1 - p) ** 1.7);
 }
 
 /** How high above the water a leaping koi is, 0 to 1 and back, for `age` seconds into the leap. */

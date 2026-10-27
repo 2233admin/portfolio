@@ -119,6 +119,8 @@ export const LIGHT_PALETTE: Palette = {
  * - `edge`: true gives outline cells a glyph that follows the outline (`/ \ ( ) _ -`) and fin cells a line along
  *   their rays, so contours and fins read as shapes rather than steps.
  * - `wake`: brightness multiplier for the tail wake and ripple glyphs.
+ * - `backdrop`: true paints the palette's page background under the pond on the canvas itself, so the pond is
+ *   opaque and a splash uncovers whatever lies beneath the canvas. Off, the canvas is transparent between glyphs.
  */
 export interface ArtOptions {
     cell?: number;
@@ -126,9 +128,10 @@ export interface ArtOptions {
     halo?: boolean;
     edge?: boolean;
     wake?: number;
+    backdrop?: boolean;
 }
 type Art = Required<Omit<ArtOptions, "cell">> & { cell: number | null };
-const DEFAULT_ART: Art = { cell: null, style: "tile", halo: true, edge: false, wake: 1 };
+const DEFAULT_ART: Art = { cell: null, style: "tile", halo: true, edge: false, wake: 1, backdrop: false };
 
 /** Light to dense, for the ink style. */
 const INK_RAMP = " .:-=+*#%@";
@@ -291,6 +294,7 @@ export class KoiRenderer {
             halo: opts.halo ?? this.art.halo,
             edge: opts.edge ?? this.art.edge,
             wake: opts.wake ?? this.art.wake,
+            backdrop: opts.backdrop ?? this.art.backdrop,
         };
         const relayout = next.cell !== this.art.cell;
         this.art = next;
@@ -395,7 +399,19 @@ export class KoiRenderer {
         // While the splash front crosses the pond, flashes are drawn after the reveal so it doesn't wipe them.
         if (!world.wave) this.drawBites(world);
         painter.flush(this.ctx);
+        if (this.art.backdrop) this.fillBackdrop();
         if (world.wave) this.drawWave(world, world.wave);
+    }
+
+    /** Paint the page background underneath everything already drawn. */
+    private fillBackdrop() {
+        const { ctx, palette } = this;
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.globalCompositeOperation = "destination-over";
+        ctx.fillStyle = `rgb(${palette.bg[0]},${palette.bg[1]},${palette.bg[2]})`;
+        ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        ctx.restore();
     }
 
     /** Wipe the whole canvas to transparent, e.g. once the pond has been washed away. */
