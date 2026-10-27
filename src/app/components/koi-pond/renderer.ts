@@ -26,8 +26,11 @@ import {
 
 export type Rgb = [number, number, number];
 
-/** The widest the fins can be flared by the usual swimming: a full spread, scull and bank together. */
-const MAX_FLARE = 1.5;
+/** How far, as a fraction of body length at full height, a leaping koi's shadow sits down and right of its body. */
+const SHADOW_SHIFT = 0.14;
+
+/** How far a leaping koi throws its fins open: wide, but not the full spread, which would swallow the frame. */
+const LEAP_FLARE = 1.2;
 
 // How visible a koi stays while it swims under page content.
 const DIM_UNDER_CONTENT = 0.15;
@@ -573,7 +576,7 @@ export class KoiRenderer {
         const h = leap ? leapHeight(leap.age) : 0;
         const bend = u < 0.4 ? smoothstep(0, 0.4, u) : 1 - smoothstep(0.4, 1, u);
         const bow = leap ? leap.side * k.length * 0.1 * bend : 0;
-        const scale = shadowOnly ? 1 - 0.25 * h : 1 + 0.35 * h;
+        const scale = shadowOnly ? 1 - 0.35 * h : 1 + 0.25 * h;
         const L0 = k.length;
         const L = L0 * scale;
         const nodes = k.nodes;
@@ -607,7 +610,7 @@ export class KoiRenderer {
         }
         if (shadowOnly) {
             // The shadow stays down on the water while the body rises, so it slides away from the body.
-            const away = (0.25 * L0 * h) / Math.SQRT2;
+            const away = (SHADOW_SHIFT * L0 * h) / Math.SQRT2;
             for (let n = 0; n < KOI_NODES; n++) {
                 spine[n * 2] += away;
                 spine[n * 2 + 1] += away;
@@ -628,8 +631,8 @@ export class KoiRenderer {
         if (leap) {
             // Fins thrown fully open while the koi is in the air.
             const open = Math.min(1, h * 1.6);
-            this.flareLeft += (MAX_FLARE - this.flareLeft) * open;
-            this.flareRight += (MAX_FLARE - this.flareRight) * open;
+            this.flareLeft += (LEAP_FLARE - this.flareLeft) * open;
+            this.flareRight += (LEAP_FLARE - this.flareRight) * open;
         }
 
         let minX = Infinity;
@@ -723,11 +726,8 @@ export class KoiRenderer {
                 const solid = centerHit && coverage >= 0.6;
                 if (shadowOnly) {
                     const skinCell = flag !== FLAG_BARBEL && flag !== FLAG_FIN && !(flag === FLAG_EYE && solid);
-                    const sc = c + shadowDc;
-                    const sr = r + shadowDr;
-                    if (skinCell && hits === 5 && sc < cols && sr < rows) {
-                        this.cellShadowLeap[sr * cols + sc] = Math.round(255 * (1 - 0.6 * h));
-                    }
+                    // The shadow's own offset is already in the spine, so it lands on the cell it was sampled in.
+                    if (skinCell && hits === 5) this.cellShadowLeap[r * cols + c] = Math.round(255 * (1 - 0.7 * h));
                     continue;
                 }
 
@@ -748,7 +748,8 @@ export class KoiRenderer {
                 } else if (flag === FLAG_FIN) {
                     // Fins are a pale veil of tiles flecked with dots, so they never compete with the body.
                     tile = mix(palette.bg, palette.fin, 0.55);
-                    tileAlpha = dim * 0.45 * coverage;
+                    // Lit to full in the air, a fin veil would turn into a solid slab, so it is thinned as the koi climbs.
+                    tileAlpha = dim * 0.45 * coverage * (1 - 0.6 * h);
                     // Rays run from the root outward: body-space (du along the spine, da away from it) in screen space.
                     const ray = () => lineGlyph(finDu * tx - finDa * side * ty, finDu * ty + finDa * side * tx);
                     if (ink) {
@@ -904,9 +905,11 @@ export class KoiRenderer {
         }
         for (let i = 0; i < cellShadowLeap.length; i++) {
             if (!cellShadowLeap[i] || cellShadow[i] || cellGlyph[i]) continue;
-            const fade = (cellShadowLeap[i] / 255) * palette.shadowAlpha * cellDim[i];
-            if (this.art.halo) this.glyphAt(i, ":", palette.shadow, fade);
-            else this.glyphAt(i, ".", palette.shadow, fade * 0.5);
+            // Sparse, faint specks rather than a block: mostly `.`, a few `:`, at most 0.35 opaque, fading as the koi climbs.
+            const pick = hash3(i, 3, 29);
+            if (pick > 0.5) continue;
+            const alpha = (cellShadowLeap[i] / 255) * Math.min(0.35, palette.shadowAlpha) * cellDim[i];
+            this.glyphAt(i, pick < 0.07 ? ":" : ".", palette.shadow, alpha);
         }
     }
 
