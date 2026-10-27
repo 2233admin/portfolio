@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { cn } from "../../../lib/utils";
 import { KoiRenderer, type ArtOptions } from "./renderer";
-import { World, type Box } from "./world";
+import { waveProgress, World, type Box } from "./world";
 
 export type PondStats = { koi: number; pellets: number };
 
@@ -51,6 +51,8 @@ class PondEngine {
     private moodTimer: ReturnType<typeof setInterval> | null = null;
     private mood: PondMood | null = null;
     private anchor: string | undefined;
+    private splashing: Promise<void> | null = null;
+    private finishSplash: (() => void) | null = null;
     private resizeObserver = new ResizeObserver(() => this.resize());
     private intersectionObserver = new IntersectionObserver(([entry]) => {
         this.visible = entry.isIntersecting;
@@ -61,7 +63,8 @@ class PondEngine {
         private canvas: HTMLCanvasElement,
         isLight: boolean,
         private onStats: (stats: PondStats) => void,
-        private onRenderMs?: (ms: number) => void
+        private onRenderMs?: (ms: number) => void,
+        private onSplashProgress?: (p: number) => void
     ) {
         this.renderer = new KoiRenderer(canvas);
         this.renderer.setTheme(isLight);
@@ -104,6 +107,32 @@ class PondEngine {
         this.renderer.setArt(opts);
     }
 
+    /**
+     * A stone dropped at the anchor: a shock front washes the pond away from there outward, so what lies under the
+     * canvas is uncovered from the middle. Resolves once the whole canvas is clear, after which the engine has
+     * stopped and released its listeners; later calls do nothing and resolve at once.
+     */
+    splash(): Promise<void> {
+        if (this.splashing) return this.splashing;
+        if (this.disposed) return Promise.resolve();
+        this.clearMood();
+        const { x, y } = this.anchorPoint();
+        this.world.splash(x, y);
+        this.splashing = new Promise<void>((resolve) => {
+            this.finishSplash = resolve;
+        });
+        return this.splashing;
+    }
+
+    /** The front has crossed the pond: leave the canvas transparent and stop everything. */
+    private endSplash() {
+        this.renderer.clear();
+        this.destroy();
+        this.onSplashProgress?.(1);
+        this.finishSplash?.();
+        this.finishSplash = null;
+    }
+
     private clearMood() {
         if (this.moodTimer !== null) clearInterval(this.moodTimer);
         this.moodTimer = null;
@@ -115,6 +144,7 @@ class PondEngine {
      * lasting effects (the heartbeat timer, unrest) are cleared first. Re-sending the same mood does nothing.
      */
     setMood(mood: PondMood, anchor?: string) {
+        if (this.splashing || this.disposed) return;
         if (mood === this.mood && anchor === this.anchor) return;
         this.mood = mood;
         this.anchor = anchor;
@@ -193,6 +223,12 @@ class PondEngine {
         const t0 = this.onRenderMs ? performance.now() : 0;
         this.renderer.render(this.world, dt);
         this.onRenderMs?.(performance.now() - t0);
+        const wave = this.world.wave;
+        if (wave) {
+            const p = waveProgress(wave, this.world.time);
+            if (p >= 1) return this.endSplash();
+            this.onSplashProgress?.(p);
+        }
         this.report();
         this.raf = requestAnimationFrame(this.frame);
     };
@@ -220,6 +256,7 @@ class PondEngine {
     private onClick = (e: MouseEvent) => {
         // The path recorded at dispatch, not target.closest(): a control that re-renders as it's clicked (the theme
         // toggle swaps its icon) can leave the target detached, with no ancestors left to find the button through.
+        if (this.splashing) return;
         if (e.composedPath().some((n) => n instanceof Element && n.matches(INTERACTIVE))) return;
         if (window.getSelection()?.toString()) return;
         const { x, y, inside } = this.toLocal(e);
@@ -246,17 +283,19 @@ type KoiPondProps = {
     art?: ArtOptions;
     /** Called with the time `render()` took, every frame. For benchmarking. */
     onRenderMs?: (ms: number) => void;
+    /** Called every frame of a splash with how far the front has gone, 0 to 1, so the page can fade its content in step. */
+    onSplashProgress?: (progress: number) => void;
 };
 
-export default function KoiPond({
-    isLight,
-    className,
-    onStats,
-    mood = "absent",
-    anchor,
-    art,
-    onRenderMs,
-}: KoiPondProps) {
+export type KoiPondHandle = {
+    /** Wash the pond away from the anchor outward; resolves once the canvas is clear and the pond has stopped for good. */
+    splash(): Promise<void>;
+};
+
+const KoiPond = forwardRef<KoiPondHandle, KoiPondProps>(function KoiPond(
+    { isLight, className, onStats, mood = "absent", anchor, art, onRenderMs, onSplashProgress },
+    ref
+) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const engineRef = useRef<PondEngine | null>(null);
     // Read through a ref so a new callback doesn't tear down the engine.
@@ -264,8 +303,12 @@ export default function KoiPond({
     onStatsRef.current = onStats;
     const onRenderMsRef = useRef(onRenderMs);
     onRenderMsRef.current = onRenderMs;
+    const onSplashProgressRef = useRef(onSplashProgress);
+    onSplashProgressRef.current = onSplashProgress;
     const artRef = useRef(art);
     artRef.current = art;
+
+    useImperativeHandle(ref, () => ({ splash: () => engineRef.current?.splash() ?? Promise.resolve() }), []);
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -274,7 +317,8 @@ export default function KoiPond({
             canvas,
             isLight,
             (stats) => onStatsRef.current?.(stats),
-            (ms) => onRenderMsRef.current?.(ms)
+            (ms) => onRenderMsRef.current?.(ms),
+            (p) => onSplashProgressRef.current?.(p)
         );
         if (artRef.current) engine.setArt(artRef.current);
         engineRef.current = engine;
@@ -297,4 +341,6 @@ export default function KoiPond({
     }, [mood, anchor]);
 
     return <canvas ref={canvasRef} aria-hidden="true" className={cn("pointer-events-none", className)} />;
-}
+});
+
+export default KoiPond;

@@ -114,9 +114,10 @@ export class CellPainter {
         return s;
     }
 
-    flush(ctx: CanvasRenderingContext2D) {
+    /** Replay the recorded draws; `clear: false` paints over what is already on the canvas. */
+    flush(ctx: CanvasRenderingContext2D, clear = true) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+        if (clear) ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
         if (this.mode === "atlas") this.flushAtlas(ctx);
         else this.flushText(ctx);
         ctx.globalAlpha = 1;

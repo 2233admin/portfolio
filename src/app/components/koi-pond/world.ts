@@ -103,6 +103,20 @@ export interface Bite {
     x: number;
     y: number;
     born: number;
+    /** Omitted for the small flash of a bite. Larger values are splashes, drawn as a crown of droplets that many cells wide. */
+    size?: number;
+}
+
+/** The shock wave `World.splash` sends out: a front that races from (x, y) to past the farthest corner. */
+export interface Wave {
+    x: number;
+    y: number;
+    born: number;
+    duration: number;
+    /** The radius the front reaches at the end, a little past the farthest corner. */
+    maxR: number;
+    /** Koi the front has already shoved, so each is pushed once. */
+    pushed: Set<Koi>;
 }
 
 export interface Ripple {
@@ -140,6 +154,10 @@ function repel(boxes: Box[], x: number, y: number, margin: number, out: { x: num
 
 export const PELLET_LIFE = 14;
 export const BITE_LIFE = 0.45;
+/** Splashes (bites with a `size`) hang in the air longer than the flash of a bite. */
+export const SPLASH_LIFE = 0.8;
+/** Seconds the splash front takes to cross the pond. */
+export const WAVE_DURATION = 0.8;
 const RUSH_RANGE = 650;
 const FEED_CALM = 2;
 /** Uneaten pellets start to sink this many seconds in, fading out by PELLET_LIFE. */
@@ -155,6 +173,8 @@ export class World {
     koi: Koi[] = [];
     pellets: Pellet[] = [];
     bites: Bite[] = [];
+    /** The splash front crossing the pond, if `splash` has been called. It stays once finished. */
+    wave: Wave | null = null;
     /** Moving the mouse to throw food isn't a threat, so swipes don't startle koi for a moment after a throw. */
     private lastFeed = -Infinity;
     ripples: Ripple[] = [];
@@ -272,6 +292,24 @@ export class World {
         }
     }
 
+    /**
+     * A stone dropped at (x, y): one strong ring and a splash there, and a shock front that crosses the pond in
+     * under a second, much faster than any ripple. Each koi it reaches is shoved outward and dives.
+     */
+    splash(x: number, y: number) {
+        const { width: W, height: H } = this;
+        this.wave = {
+            x,
+            y,
+            born: this.time,
+            duration: WAVE_DURATION,
+            maxR: Math.hypot(Math.max(x, W - x), Math.max(y, H - y)) + 48,
+            pushed: new Set(),
+        };
+        this.ripples.push({ x, y, born: this.time, strength: 1 });
+        this.bites.push({ x, y, born: this.time, size: 3 });
+    }
+
     /** Persistent unrest, 0 (calm) to 1: koi cap their depth near 0.55, slow down by up to 35% and stop following the cursor. */
     setUnease(level: number) {
         this.unease = clamp(level, 0, 1);
@@ -281,6 +319,7 @@ export class World {
         this.time += dt;
         this.pointer.speed *= Math.exp(-dt * 8);
         for (const k of this.koi) this.stepKoi(k, dt);
+        if (this.wave) this.stepWave(this.wave);
         const t = this.time;
         this.pellets = this.pellets.filter((p) => t - p.born < PELLET_LIFE);
         for (const p of this.pellets) {
@@ -301,7 +340,30 @@ export class World {
             p.y += p.vy * dt;
         }
         this.ripples = this.ripples.filter((r) => t - r.born < rippleLife(r));
-        this.bites = this.bites.filter((b) => t - b.born < BITE_LIFE);
+        this.bites = this.bites.filter((b) => t - b.born < (b.size ? SPLASH_LIFE : BITE_LIFE));
+    }
+
+    /** Shove each koi the front has just reached: an outward push like a fright, plus a dive. */
+    private stepWave(wave: Wave) {
+        const r = waveRadius(wave, this.time);
+        for (const k of this.koi) {
+            if (wave.pushed.has(k)) continue;
+            let near = Infinity;
+            for (let n = 0; n < KOI_NODES; n++) {
+                near = Math.min(near, Math.hypot(k.nodes[n * 2] - wave.x, k.nodes[n * 2 + 1] - wave.y));
+            }
+            if (near > r) continue;
+            wave.pushed.add(k);
+            k.startle = 1;
+            k.fleeX = wave.x;
+            k.fleeY = wave.y;
+            k.depthTarget = 0.5;
+            k.nextDive = Math.max(k.nextDive, this.time + 8);
+            k.speed = Math.max(k.speed, (12 + k.length * 0.05) * 6);
+            // Swing the head part-way round to face away from the stone at once; the body follows within its bend limit.
+            const away = Math.atan2(k.nodes[1] - wave.y, k.nodes[0] - wave.x);
+            k.heading += clamp(angleDiff(k.heading, away), -0.6, 0.6);
+        }
     }
 
     private stepKoi(k: Koi, dt: number) {
@@ -528,6 +590,17 @@ export class World {
         }
         return best;
     }
+}
+
+/** Progress of the splash front, 0 at the drop to 1 once it has crossed the pond. */
+export function waveProgress(w: Wave, time: number) {
+    return clamp((time - w.born) / w.duration, 0, 1);
+}
+
+/** Radius of the splash front: fast at first, easing out (cubic) to `maxR`. */
+export function waveRadius(w: Wave, time: number) {
+    const p = waveProgress(w, time);
+    return w.maxR * (1 - (1 - p) ** 3);
 }
 
 export function rippleLife(r: Ripple) {

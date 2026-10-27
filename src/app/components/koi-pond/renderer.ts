@@ -5,13 +5,19 @@ import {
     hash3,
     BITE_LIFE,
     KOI_NODES,
+    TAU,
     PELLET_LIFE,
     PELLET_SINK,
     RIPPLE_SPEED,
     rippleLife,
     smoothstep,
+    SPLASH_LIFE,
+    waveProgress,
+    waveRadius,
+    type Bite,
     type Box,
     type Koi,
+    type Wave,
     type World,
 } from "./world";
 
@@ -373,8 +379,72 @@ export class KoiRenderer {
         this.drawRipples(world);
         this.drawPellets(world);
         this.drawCells();
-        this.drawBites(world);
+        // While the splash front crosses the pond, flashes are drawn after the reveal so it doesn't wipe them.
+        if (!world.wave) this.drawBites(world);
         painter.flush(this.ctx);
+        if (world.wave) this.drawWave(world, world.wave);
+    }
+
+    /** Wipe the whole canvas to transparent, e.g. once the pond has been washed away. */
+    clear() {
+        this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+        this.ctx.clearRect(0, 0, this.ctx.canvas.width, this.ctx.canvas.height);
+    }
+
+    // ── splash ──────────────────────────────────────────────────────────
+
+    /**
+     * The splash front: the pond is erased inside it (with a soft edge a couple of cells wide), so whatever lies
+     * under the canvas shows from the centre outward. A bright band of line glyphs rides the front, with two fainter
+     * rings trailing behind it.
+     */
+    private drawWave(world: World, wave: Wave) {
+        const { ctx, cw, ch, cols, rows, palette, painter, dpr } = this;
+        const p = waveProgress(wave, world.time);
+        const r = waveRadius(wave, world.time);
+        const soft = cw * 2;
+        if (r >= 1) {
+            ctx.save();
+            ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+            ctx.globalCompositeOperation = "destination-out";
+            const g = ctx.createRadialGradient(wave.x, wave.y, 0, wave.x, wave.y, r);
+            g.addColorStop(Math.max(0, (r - soft) / r), "rgba(0,0,0,1)");
+            g.addColorStop(1, "rgba(0,0,0,0)");
+            ctx.fillStyle = g;
+            ctx.fillRect(0, 0, this.width, this.height);
+            ctx.restore();
+        }
+
+        painter.begin();
+        // The ring weakens as it thins out toward the edges.
+        const fade = 1 - 0.5 * smoothstep(0.6, 1, p);
+        // Front band: 2.5 cells wide, brightest at its leading edge. Then two thinner rings further back.
+        const bands = [
+            { at: r - cw * 1.25, half: cw * 1.25, alpha: 0.95, dots: false, taper: true },
+            { at: r - cw * 5, half: cw * 0.6, alpha: 0.5, dots: false, taper: false },
+            { at: r - cw * 8.5, half: cw * 0.6, alpha: 0.26, dots: true, taper: false },
+        ];
+        for (const band of bands) {
+            if (band.at < 2) continue;
+            const c0 = Math.max(0, Math.floor((wave.x - band.at - band.half) / cw));
+            const c1 = Math.min(cols - 1, Math.floor((wave.x + band.at + band.half) / cw));
+            const r0 = Math.max(0, Math.floor((wave.y - band.at - band.half) / ch));
+            const r1 = Math.min(rows - 1, Math.floor((wave.y + band.at + band.half) / ch));
+            for (let row = r0; row <= r1; row++) {
+                for (let col = c0; col <= c1; col++) {
+                    const dx = col * cw + cw / 2 - wave.x;
+                    const dy = row * ch + ch / 2 - wave.y;
+                    const off = Math.hypot(dx, dy) - band.at;
+                    if (Math.abs(off) > band.half) continue;
+                    // Within the front band, dimmer toward the trailing edge.
+                    const lead = band.taper ? 0.55 + 0.45 * ((off + band.half) / (2 * band.half)) : 1;
+                    const glyph = band.dots ? "." : lineGlyph(-dy, dx);
+                    this.glyphAt(row * cols + col, glyph, palette.water, Math.min(1, band.alpha * lead * fade));
+                }
+            }
+        }
+        this.drawBites(world);
+        painter.flush(ctx, false);
     }
 
     private glyphAt(i: number, glyph: string, rgb: Rgb, alpha: number) {
@@ -807,11 +877,41 @@ export class KoiRenderer {
     private drawBites(world: World) {
         const { palette } = this;
         for (const b of world.bites) {
+            if (b.size) {
+                this.drawSplash(b, world.time);
+                continue;
+            }
             const i = this.cellIndex(b.x, b.y);
             if (i < 0) continue;
             const t = (world.time - b.born) / BITE_LIFE;
             const glyph = t < 0.35 ? "*" : t < 0.7 ? "+" : ".";
             this.glyphAt(i, glyph, palette.pellet, Math.min(1, palette.alpha * 1.6) * (1 - t * t));
+        }
+    }
+
+    /** A splash: a burst at the centre and a crown of droplets thrown outward, `size` cells deep, fading as they land. */
+    private drawSplash(b: Bite, now: number) {
+        const { palette, cw, ch } = this;
+        const t = (now - b.born) / SPLASH_LIFE;
+        const alpha = Math.min(1, palette.alpha * 1.6) * (1 - t * t);
+        const centre = this.cellIndex(b.x, b.y);
+        if (centre >= 0) this.glyphAt(centre, t < 0.3 ? "*" : t < 0.6 ? "+" : ".", palette.water, alpha);
+        const drops = 8 + 4 * b.size!;
+        const seed = Math.round(b.born * 1000);
+        for (let j = 0; j < drops; j++) {
+            // Each droplet flies out at its own angle and speed and falls short of the crown's full reach.
+            const angle = hash3(seed, j, 11) * TAU;
+            const reach = (0.4 + 0.6 * hash3(seed, j, 12)) * b.size! * 2.6;
+            const flight = Math.min(1, t * 1.6);
+            const d = reach * (1 - (1 - flight) ** 2);
+            const i = this.cellIndex(b.x + Math.cos(angle) * d * cw, b.y + Math.sin(angle) * d * ch);
+            if (i < 0) continue;
+            this.glyphAt(
+                i,
+                t < 0.35 ? "o" : t < 0.65 ? "*" : ".",
+                palette.water,
+                alpha * (0.6 + 0.4 * hash3(seed, j, 13))
+            );
         }
     }
 
