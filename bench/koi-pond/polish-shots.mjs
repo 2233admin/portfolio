@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Frozen-clock screenshots of the default look: polish-swim, polish-feed (1.5 s after food lands) and polish-ripple.
-//   node bench/koi-pond/build-gate-preview.mjs && node bench/koi-pond/polish-shots.mjs [seed] [feedX feedY]
+//   node bench/koi-pond/build-gate-preview.mjs && node bench/koi-pond/polish-shots.mjs [seed] [feedX feedY] [goldenMs]
 import { chromium } from "playwright";
 import { mkdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -60,6 +60,14 @@ const report = { seed, errors };
     await page.mouse.click(feedAt.x, feedAt.y);
     await page.clock.runFor(1200);
     report.ripple = await save(page, "polish-ripple");
+    await ctx.close();
+}
+{
+    const { ctx, page } = await frozen();
+    await page.clock.runFor(3000);
+    await page.getByRole("button", { name: "放一条金鲤" }).click();
+    await page.clock.runFor(Number(process.argv[5] ?? 2000));
+    report.golden = await save(page, "golden");
     await ctx.close();
 }
 console.log(JSON.stringify(report));

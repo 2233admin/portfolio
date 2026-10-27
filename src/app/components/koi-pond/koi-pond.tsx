@@ -112,6 +112,12 @@ class PondEngine {
         this.world.autoLeap = on;
     }
 
+    /** Add the golden koi now, unless there already is one. */
+    spawnGolden() {
+        if (this.splashing || this.disposed) return false;
+        return this.world.spawnGolden();
+    }
+
     /** Make one koi leap right now: one near the surface if there is one. */
     leap() {
         if (this.splashing || this.disposed) return false;
@@ -272,6 +278,8 @@ class PondEngine {
         if (window.getSelection()?.toString()) return;
         const { x, y, inside } = this.toLocal(e);
         if (!inside) return;
+        // A click on the golden koi startles it instead of feeding.
+        if (this.world.pokeGolden(x, y, this.renderer.cellWidth)) return;
         this.world.feed(x, y);
         this.report();
     };
@@ -303,6 +311,8 @@ type KoiPondProps = {
 export type KoiPondHandle = {
     /** Make one koi leap right now, e.g. to preview it. */
     leap(): boolean;
+    /** Add the golden koi now; false if the pond already has one. */
+    spawnGolden(): boolean;
     /** Wash the pond away from the anchor outward; resolves once the canvas is clear and the pond has stopped for good. */
     splash(): Promise<void>;
 };
@@ -329,6 +339,7 @@ const KoiPond = forwardRef<KoiPondHandle, KoiPondProps>(function KoiPond(
         ref,
         () => ({
             leap: () => engineRef.current?.leap() ?? false,
+            spawnGolden: () => engineRef.current?.spawnGolden() ?? false,
             splash: () => engineRef.current?.splash() ?? Promise.resolve(),
         }),
         []

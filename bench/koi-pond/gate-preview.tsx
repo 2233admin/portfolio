@@ -136,6 +136,9 @@ function App() {
                     <button type="button" className="btn" onClick={() => pond.current?.leap()}>
                         跳一条
                     </button>
+                    <button type="button" className="btn" onClick={() => pond.current?.spawnGolden()}>
+                        放一条金鲤
+                    </button>
                     <button type="button" className="btn primary" onClick={enter}>
                         进入 ⏎
                     </button>

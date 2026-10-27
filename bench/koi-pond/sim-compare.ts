@@ -51,7 +51,7 @@ for (const seed of [1, 2, 3]) {
     const rngNew = mulberry32(seed);
     const worlds = [
         { w: new Old(), rng: rngOld },
-        { w: new New(), rng: rngNew },
+        { w: new New({ goldenChance: 0 }), rng: rngNew },
     ];
     for (const { w, rng } of worlds) {
         Math.random = rng;

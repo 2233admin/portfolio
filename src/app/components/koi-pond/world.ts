@@ -1,3 +1,5 @@
+import { bodyHalfWidth } from "./shape";
+
 export const TAU = Math.PI * 2;
 export const KOI_NODES = 20;
 export const RIPPLE_SPEED = 52;
@@ -28,7 +30,8 @@ export function hash3(x: number, y: number, z: number) {
 
 export type Box = { left: number; top: number; right: number; bottom: number };
 
-export type Variety = "kohaku" | "sanke" | "tancho";
+/** `ogon` is the golden koi (Yamabuki Ogon): never drawn at random, only by `goldenChance` or `spawnGolden`. */
+export type Variety = "kohaku" | "sanke" | "tancho" | "ogon";
 
 const VARIETY_WEIGHTS: [Variety, number][] = [
     ["kohaku", 3],
@@ -113,6 +116,8 @@ export interface Bite {
     x: number;
     y: number;
     born: number;
+    /** Drawn in bright gold instead of water white. */
+    gold?: boolean;
     /** Omitted for the small flash of a bite. Larger values are splashes, drawn as a crown of droplets that many cells wide. */
     size?: number;
 }
@@ -205,6 +210,23 @@ export class World {
     /** 0..1 persistent unrest set by `setUnease`: koi stay deeper, swim slower and ignore the cursor. */
     private unease = 0;
 
+    /** Chance that a new pond also holds a golden koi; 0 never draws from the random source. */
+    goldenChance: number;
+    /** The golden-koi roll uses its own generator so Math.random, and with it the school, is left untouched. */
+    private goldenRoll: () => number;
+
+    constructor(options: { goldenChance?: number; goldenSeed?: number } = {}) {
+        this.goldenChance = options.goldenChance ?? 1 / 50;
+        let a = (options.goldenSeed ?? Date.now() ^ Math.round(performance.now() * 1000)) >>> 0;
+        this.goldenRoll = () => {
+            a = (a + 0x6d2b79f5) >>> 0;
+            let t = a;
+            t = Math.imul(t ^ (t >>> 15), t | 1);
+            t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+            return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+        };
+    }
+
     resize(width: number, height: number) {
         const first = this.width === 0;
         this.width = width;
@@ -228,42 +250,111 @@ export class World {
             const heading = rand(0, TAU);
             const x = rand(W * 0.1, W * 0.9);
             const y = rand(H * 0.1, H * 0.9);
-            const nodes = new Float32Array(KOI_NODES * 2);
-            const seg = length / (KOI_NODES - 1);
-            for (let n = 0; n < KOI_NODES; n++) {
-                nodes[n * 2] = x - Math.cos(heading) * seg * n;
-                nodes[n * 2 + 1] = y - Math.sin(heading) * seg * n;
-            }
-            this.koi.push({
-                id: i + 1,
-                variety: pickVariety(),
-                length,
-                nodes,
-                heading,
-                speed: 20,
-                phase: rand(0, TAU),
-                turn: 0,
-                wander: 0,
-                curiosity: rand(0.35, 1),
-                depth: rand(0.5, depthMax),
-                depthTarget: rand(0.5, depthMax),
-                depthMax,
-                nextDive: rand(6, 18),
-                nextSurface: rand(3, 14),
-                nextWake: rand(0, 2),
-                beat: 0,
-                rush: 0,
-                food: null,
-                burstUntil: 0,
-                nextBurst: rand(0, 3),
-                finPhase: rand(0, TAU),
-                startle: 0,
-                fleeX: 0,
-                fleeY: 0,
-                gulp: 0,
-                leap: null,
-            });
+            this.koi.push(this.makeKoi(i + 1, length, depthMax, heading, x, y));
         }
+        // The golden koi is an extra fish, drawn after the school so the school itself is the same with or without it.
+        if (this.goldenChance > 0 && this.goldenRoll() < this.goldenChance) this.addGolden();
+    }
+
+    private makeKoi(id: number, length: number, depthMax: number, heading: number, x: number, y: number): Koi {
+        const nodes = new Float32Array(KOI_NODES * 2);
+        const seg = length / (KOI_NODES - 1);
+        for (let n = 0; n < KOI_NODES; n++) {
+            nodes[n * 2] = x - Math.cos(heading) * seg * n;
+            nodes[n * 2 + 1] = y - Math.sin(heading) * seg * n;
+        }
+        return {
+            id,
+            variety: pickVariety(),
+            length,
+            nodes,
+            heading,
+            speed: 20,
+            phase: rand(0, TAU),
+            turn: 0,
+            wander: 0,
+            curiosity: rand(0.35, 1),
+            depth: rand(0.5, depthMax),
+            depthTarget: rand(0.5, depthMax),
+            depthMax,
+            nextDive: rand(6, 18),
+            nextSurface: rand(3, 14),
+            nextWake: rand(0, 2),
+            beat: 0,
+            rush: 0,
+            food: null,
+            burstUntil: 0,
+            nextBurst: rand(0, 3),
+            finPhase: rand(0, TAU),
+            startle: 0,
+            fleeX: 0,
+            fleeY: 0,
+            gulp: 0,
+            leap: null,
+        };
+    }
+
+    private addGolden(avoidContent = false) {
+        const { width: W, height: H } = this;
+        const length = clamp(Math.min(W, H) * 0.5, 170, 420) * rand(0.7, 0.9);
+        // Appears broadside in the lower middle of the pond with room on both sides, so the whole fish is in view.
+        const margin = clamp(length * 1.05 + 16, W * 0.2, W * 0.5);
+        const place = () => ({ x: rand(margin, W - margin), y: rand(H * 0.45, H * 0.8) });
+        let { x, y } = place();
+        for (let tries = 0; avoidContent && tries < 12; tries++) {
+            const inside = this.avoid.some(
+                (b) => x > b.left - length && x < b.right + length && y > b.top - length && y < b.bottom + length
+            );
+            if (!inside) break;
+            ({ x, y } = place());
+        }
+        const heading = (Math.random() < 0.5 ? 0 : Math.PI) + rand(-0.5, 0.5);
+        const id = this.koi.reduce((m, k) => Math.max(m, k.id), 0) + 1;
+        const fish = this.makeKoi(id, length, 1, heading, x, y);
+        fish.variety = "ogon";
+        // Up near the surface, so the gold catches the light.
+        fish.depth = fish.depthTarget = rand(0.82, 1);
+        this.koi.push(fish);
+        return fish;
+    }
+
+    /** Add the golden koi now, near the surface. Returns false if the pond already has one (or has no size yet). */
+    spawnGolden(): boolean {
+        if (this.width === 0 || this.koi.some((k) => k.variety === "ogon")) return false;
+        const fish = this.addGolden(true);
+        this.ripples.push({ x: fish.nodes[0], y: fish.nodes[1], born: this.time, strength: 0.5 });
+        return true;
+    }
+
+    /**
+     * A click at (x, y) that lands on the golden koi (within the body's half-width plus `cell` px of its spine)
+     * startles it away instead of feeding, with a small burst of gold sparks. Returns whether it hit.
+     */
+    pokeGolden(x: number, y: number, cell: number): boolean {
+        for (const k of this.koi) {
+            if (k.variety !== "ogon") continue;
+            let best = Infinity;
+            let bestS = 0;
+            for (let n = 0; n < KOI_NODES - 1; n++) {
+                const ax = k.nodes[n * 2];
+                const ay = k.nodes[n * 2 + 1];
+                const sx = k.nodes[n * 2 + 2] - ax;
+                const sy = k.nodes[n * 2 + 3] - ay;
+                const u = clamp(((x - ax) * sx + (y - ay) * sy) / (sx * sx + sy * sy || 1), 0, 1);
+                const d = Math.hypot(x - ax - sx * u, y - ay - sy * u);
+                if (d < best) {
+                    best = d;
+                    bestS = (n + u) / (KOI_NODES - 1);
+                }
+            }
+            if (best >= bodyHalfWidth(bestS) * k.length + cell) continue;
+            k.startle = 1;
+            k.fleeX = x;
+            k.fleeY = y;
+            this.bites.push({ x, y, born: this.time, size: 2, gold: true });
+            return true;
+        }
+        return false;
     }
 
     /** A loose handful thrown at (x, y): each pellet lands a beat apart with its own splash, then drifts and sinks. */

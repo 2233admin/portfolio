@@ -45,7 +45,7 @@ class Scene {
         public height: number
     ) {
         Math.random = this.rng;
-        this.world = new World();
+        this.world = new World({ goldenChance: 0 });
         this.world.resize(width, height);
         // A content card in the middle, so the dimming path is exercised too.
         this.boxes = [

@@ -50,7 +50,7 @@ function measure(seed: number) {
     const renderer = new KoiRenderer(canvas);
     renderer.setArt({ cell: 8 });
     renderer.resize(1440, 900, 1);
-    const world = new World();
+    const world = new World({ goldenChance: 0 });
     world.resize(1440, 900);
     for (let i = 0; i < 600; i++) world.step(STEP);
     world.leap();

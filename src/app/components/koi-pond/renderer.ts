@@ -60,6 +60,8 @@ export interface Palette {
     hi: Rgb[];
     /** Glyph brightness relative to the tile under it. */
     ink: number;
+    /** The golden koi's skin from deep shadow to a bright highlight, in six steps. */
+    gold: Rgb[];
 }
 
 export const DARK_PALETTE: Palette = {
@@ -85,6 +87,14 @@ export const DARK_PALETTE: Palette = {
         [255, 178, 96],
     ],
     ink: 0.42,
+    gold: [
+        [92, 54, 16],
+        [146, 88, 24],
+        [198, 132, 36],
+        [232, 168, 58],
+        [248, 198, 100],
+        [255, 226, 152],
+    ],
 };
 
 // Paper page: tiles are pale washes of the skin colour with dark glyphs etched on top.
@@ -111,6 +121,14 @@ export const LIGHT_PALETTE: Palette = {
         [248, 176, 116],
     ],
     ink: 0.45,
+    gold: [
+        [118, 68, 12],
+        [166, 102, 20],
+        [204, 136, 34],
+        [228, 164, 52],
+        [242, 192, 92],
+        [250, 216, 140],
+    ],
 };
 
 /**
@@ -290,6 +308,11 @@ export class KoiRenderer {
     /** Switch between `fillText` and the glyph atlas; takes effect on the next frame. */
     setGlyphMode(mode: GlyphMode) {
         this.painter.mode = mode;
+    }
+
+    /** The width of a grid cell in CSS px. */
+    get cellWidth() {
+        return this.cw;
     }
 
     /** Change the art options (merged into the current ones); a new cell size re-lays-out the grid. */
@@ -660,6 +683,7 @@ export class KoiRenderer {
         // Each side gets a single eye: the eye-hit cell closest to where the eye ideally sits. The rest of the
         // eye band is painted as plain skin, so a big koi doesn't grow a row of "o o o o".
         const eyeCell = this.pickEyeCells(L);
+        const gold = k.variety === "ogon";
 
         const diag = Math.hypot(cw, ch);
         // Near the surface a koi is brighter and its shadow falls farther away on the floor.
@@ -758,7 +782,9 @@ export class KoiRenderer {
                     // Fins are a faint wash of tile with rays drawn over it in the pale body colour, so they read
                     // as translucent membrane next to the body rather than a slab. The tail keeps the V notch of its
                     // outline because cells outside it are simply not hit.
-                    tile = mix(palette.bg, palette.fin, 0.55);
+                    // The golden koi's fins are pale gold.
+                    const finTint = gold ? ramp(palette.gold, palette.bg[0] < 128 ? 0.9 : 0.5) : palette.white;
+                    tile = mix(palette.bg, gold ? finTint : palette.fin, 0.55);
                     tileAlpha = dim * 0.45 * coverage * 0.25;
                     // Rays run from the root outward: body-space (du along the spine, da away from it) in screen space.
                     const ray = () => lineGlyph(finDu * tx - finDa * side * ty, finDu * ty + finDa * side * tx);
@@ -773,16 +799,25 @@ export class KoiRenderer {
                         tileAlpha *= 1 - clamp(h / 0.5, 0, 1);
                         if (!halo) tileAlpha *= 0.35;
                         glyph = coverage >= 0.4 ? ray() : ".";
-                        rgb = palette.white;
+                        rgb = finTint;
                         alpha = dim * (0.5 + 0.4 * coverage);
                     }
                 } else {
                     // Each skin cell is a tile washed in the skin colour, shaded like a rounded back lit from
                     // the top-left, with a dense glyph etched on top. Edge cells get a paler, empty tile.
-                    const skin = this.skin(k, s, v, across, L);
+                    // The golden koi is one colour all over; its "skin" is routed through the red path with the gold ramp.
+                    const skin = gold ? palette.red : this.skin(k, s, v, across, L);
                     const facing = side * (0.6 * ty - 0.8 * tx) * across;
                     const lum = clamp(0.22 + 0.5 * Math.sqrt(1 - across * across) + 0.18 * facing, 0, 1);
-                    if (skin === palette.red) {
+                    if (gold) {
+                        // Metallic: a soft highlight band (about 0.15 of the body long, 2.5 s end to end) slides from
+                        // the head to the tail, lifting the gold a step or two as it passes.
+                        const centre = ((t / 2.5 + hash3(k.id, 9, 5)) % 1) * 1.3 - 0.15;
+                        const x = clamp((s - centre) / 0.075, -1, 1);
+                        const band = 0.5 * (1 + Math.cos(Math.PI * x));
+                        const grain = (valueNoise(s * 9 + k.id, (v / L) * 18, k.id + 21) - 0.5) * 0.12;
+                        tile = ramp(palette.gold, 0.12 + 0.68 * lum + grain + band * 0.5);
+                    } else if (skin === palette.red) {
                         // Red patches run the full hi ramp: crimson in shadow, vermilion across the back, orange
                         // to amber where the light hits. Each koi leans a little redder or more orange, and a
                         // slow body-pinned noise varies the hue within a patch, like real pigment.
@@ -1036,8 +1071,9 @@ export class KoiRenderer {
         const { palette, cw, ch } = this;
         const t = (now - b.born) / SPLASH_LIFE;
         const alpha = Math.min(1, palette.alpha * 1.6) * (1 - t * t);
+        const colour = b.gold ? ramp(palette.gold, 0.95) : palette.water;
         const centre = this.cellIndex(b.x, b.y);
-        if (centre >= 0) this.glyphAt(centre, t < 0.3 ? "*" : t < 0.6 ? "+" : ".", palette.water, alpha);
+        if (centre >= 0) this.glyphAt(centre, t < 0.3 ? "*" : t < 0.6 ? "+" : ".", colour, alpha);
         const drops = 8 + 4 * b.size!;
         const seed = Math.round(b.born * 1000);
         for (let j = 0; j < drops; j++) {
@@ -1048,12 +1084,7 @@ export class KoiRenderer {
             const d = reach * (1 - (1 - flight) ** 2);
             const i = this.cellIndex(b.x + Math.cos(angle) * d * cw, b.y + Math.sin(angle) * d * ch);
             if (i < 0) continue;
-            this.glyphAt(
-                i,
-                t < 0.35 ? "o" : t < 0.65 ? "*" : ".",
-                palette.water,
-                alpha * (0.6 + 0.4 * hash3(seed, j, 13))
-            );
+            this.glyphAt(i, t < 0.35 ? "o" : t < 0.65 ? "*" : ".", colour, alpha * (0.6 + 0.4 * hash3(seed, j, 13)));
         }
     }
 
