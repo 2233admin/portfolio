@@ -334,6 +334,7 @@ export class World {
 
         let chasing = false;
         let curious = false;
+        let lured = false;
         let closing = 0;
         if (fleeing) {
             const ox = hx - k.fleeX;
@@ -372,11 +373,13 @@ export class World {
             const d = Math.hypot(tx, ty) || 1;
             const range = 0.45 * Math.min(W, H);
             if (d < range) {
-                const w = k.curiosity * (1 - d / range) * 2.2;
-                const near = clamp(d / (L * 0.6), 0, 1);
+                // Unlike the cursor, the lure is far away and short-lived, so its pull doesn't fade to nothing at the rim.
+                const w = k.curiosity * (0.5 + 0.5 * (1 - d / range)) * 3.2;
+                const near = clamp(d / (L * 0.9), 0, 1);
                 dx += ((tx / d) * near - (ty / d) * (1 - near)) * w;
                 dy += ((ty / d) * near + (tx / d) * (1 - near)) * w;
                 curious = true;
+                lured = true;
             }
         }
 
@@ -436,7 +439,7 @@ export class World {
             k.burstUntil = time + rand(0.7, 1.6);
             k.nextBurst = k.burstUntil + rand(1.2, 4);
         }
-        const bursting = fleeing || chasing || time < k.burstUntil;
+        const bursting = fleeing || chasing || lured || time < k.burstUntil;
         k.beat += ((bursting ? 1 : 0) - k.beat) * Math.min(1, dt * 3);
         // Tail beats near the surface push small rings out behind the koi; gliding or deep koi leave none.
         if (k.beat > 0.6 && k.depth > 0.65 && time > k.nextWake) {
@@ -455,7 +458,7 @@ export class World {
                 : chasing
                   ? cruise * (1.9 + closing)
                   : bursting
-                    ? calm * (curious ? 1.6 : 1.35)
+                    ? calm * (lured ? 2.4 : curious ? 1.6 : 1.35)
                     : calm * 0.45);
         k.speed += (target - k.speed) * Math.min(1, dt * (bursting ? 1.6 + k.rush * 3 : 0.35));
         k.phase += dt * (0.6 + k.beat * (2.2 + k.speed / 11));
